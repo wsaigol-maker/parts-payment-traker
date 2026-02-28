@@ -1,0 +1,1177 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  Plus, Trash2, TrendingUp, DollarSign, Download, Save, 
+  RefreshCw, Users, FileText, CheckCircle, Search, 
+  Hash, Calendar, MapPin, Activity, PieChart,
+  Wifi, Calculator, Database, Filter, X, Printer, FileBarChart, Lock, ClipboardList, Upload
+} from 'lucide-react';
+
+// --- FIREBASE IMPORTS ---
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, query, doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
+
+// --- DYNAMIC CONFIGURATION ---
+const ENV_APP_ID = 'payment-cycle-production'; 
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDW1WYymS2rFwH1gNoWyXo0T2aaFO3wa-o",
+  authDomain: "payment-cycle-9f3ab.firebaseapp.com",
+  projectId: "payment-cycle-9f3ab",
+  storageBucket: "payment-cycle-9f3ab.firebasestorage.app",
+  messagingSenderId: "137486312691",
+  appId: "1:137486312691:web:33c701df338bd0b7494386",
+  measurementId: "G-NMHKHHZFM2"
+};
+const initialAuthToken = null;
+
+// Constants
+const OUTLETS = ['Dha', 'Jt', 'Qr'];
+const CURRENCY = 'PKR';
+const GLOBAL_WH_TAX_RATE = 0.05;
+
+// --- HELPERS ---
+const getPoCollectionPath = (id) => `artifacts/${id}/public/data/purchaseOrders`;
+const getPaymentsCollectionPath = (id) => `artifacts/${id}/public/data/payments`;
+
+const formatCurrency = (amount) => {
+    const val = parseFloat(amount);
+    if (isNaN(val)) return `${CURRENCY} 0`;
+    return `${CURRENCY} ${val.toLocaleString('en-US')}`;
+};
+
+const sanitizeId = (id) => {
+    if (!id) return '';
+    return id.replace(/\//g, '_'); 
+};
+
+const generateCompositeId = (outlet, poNo) => {
+    if (!outlet || !poNo) return '';
+    const cleanPo = poNo.replace(/\//g, '_');
+    return `${outlet}_${cleanPo}`;
+};
+
+const formatDisplayDate = (isoDate) => {
+    if (!isoDate || typeof isoDate !== 'string') return '';
+    try {
+        const parts = isoDate.split('-');
+        if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    } catch (e) { }
+    return isoDate;
+};
+
+// N+3 Logic (Returns YYYY-MM)
+const getPayableMonth = (invoiceDateStr) => {
+    if (!invoiceDateStr) return '';
+    const d = new Date(invoiceDateStr + 'T00:00:00'); // Force local time
+    if (isNaN(d.getTime())) return '';
+    d.setMonth(d.getMonth() + 3); 
+    return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`;
+};
+
+const getDisplayMonth = (isoDate) => {
+    if (!isoDate) return '';
+    const [year, month] = isoDate.split('-');
+    const date = new Date(year, parseInt(month) - 1);
+    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
+};
+
+const getPaymentBatch = (invoiceDateStr) => {
+    if (!invoiceDateStr) return 'N/A';
+    const d = new Date(invoiceDateStr + 'T00:00:00');
+    if (isNaN(d.getTime())) return 'N/A';
+    const day = d.getDate();
+    if (day <= 15) return 'Run 1';
+    if (day <= 24) return 'Run 2';
+    return 'Run 3';
+};
+
+const generateNextPoNumber = (transactions, currentOutlet) => {
+    const currentYearShort = new Date().getFullYear().toString().slice(-2); 
+    const prefix = `${currentYearShort}/`;
+    
+    const currentYearPos = transactions
+        .filter(t => t.outlet === currentOutlet)
+        .map(t => t.poNo)
+        .filter(no => no && typeof no === 'string' && no.startsWith(prefix));
+
+    if (currentYearPos.length === 0) return `${prefix}0001`;
+
+    const maxNum = currentYearPos.reduce((max, po) => {
+        const parts = po.split('/');
+        if (parts.length < 2) return max;
+        const part = parseInt(parts[1]);
+        return !isNaN(part) && part > max ? part : max;
+    }, 0);
+
+    const nextNum = (maxNum + 1).toString().padStart(4, '0');
+    return `${prefix}${nextNum}`;
+};
+
+// --- CSV PARSER HELPER ---
+const parseCSV = (text) => {
+    const result = [];
+    let row = [];
+    let inQuotes = false;
+    let val = '';
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (inQuotes) {
+            if (char === '"') {
+                if (i + 1 < text.length && text[i + 1] === '"') { val += '"'; i++; }
+                else { inQuotes = false; }
+            } else { val += char; }
+        } else {
+            if (char === '"') { inQuotes = true; }
+            else if (char === ',') { row.push(val); val = ''; }
+            else if (char === '\n' || char === '\r') {
+                row.push(val); val = '';
+                if (row.some(c => c.trim() !== '')) result.push(row);
+                row = [];
+                if (char === '\r' && i + 1 < text.length && text[i + 1] === '\n') i++;
+            } else { val += char; }
+        }
+    }
+    if (val || row.length > 0) { row.push(val); result.push(row); }
+    return result;
+};
+
+// --- INITIAL STATES ---
+const EMPTY_PO_STATE = {
+    poNo: '', 
+    outlet: 'Dha', 
+    poDate: new Date().toISOString().split('T')[0], 
+    dcs: [],      
+    invoices: [], 
+    poAmount: '' 
+};
+
+const EMPTY_INV_INPUT = { 
+    number: '', 
+    date: '', 
+    baseAmount: '', 
+    gst: '0', 
+    whTax: '0', 
+    fed: '0', 
+    grossTotal: 0,
+    amount: 0,      
+    note: '', 
+    isAOS: false 
+};
+const EMPTY_DC_INPUT = { dcNo: '', dcDate: '' };
+
+const App = () => {
+  const [activeTab, setActiveTab] = useState('entry');
+  const [activeBranchTab, setActiveBranchTab] = useState('Dha'); // Default Branch
+  const [currentLedgerId, setCurrentLedgerId] = useState(ENV_APP_ID);
+  
+  const [poData, setPoData] = useState([]);
+  const [legacyData, setLegacyData] = useState([]);
+  const [paymentData, setPaymentData] = useState({});
+  const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+  
+  const [currentPo, setCurrentPo] = useState(EMPTY_PO_STATE);
+  const [stageDc, setStageDc] = useState(EMPTY_DC_INPUT);
+  const [stageInv, setStageInv] = useState(EMPTY_INV_INPUT);
+  const [editingPayment, setEditingPayment] = useState({ monthKey: null, run1: 0, run2: 0, run3: 0 });
+
+  const [db, setDb] = useState(null);
+  const [user, setUser] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [currentAction, setCurrentAction] = useState('ADD'); 
+
+  // --- AUTO-CALCULATION EFFECT ---
+  useEffect(() => {
+    const base = parseFloat(stageInv.baseAmount) || 0;
+    const gst = parseFloat(stageInv.gst) || 0;
+    const fed = parseFloat(stageInv.fed) || 0;
+    const wh = parseFloat(stageInv.whTax) || 0;
+    
+    // Total = Base + GST + WH + FED
+    const total = base + gst + wh + fed;
+    
+    setStageInv(prev => ({ ...prev, amount: total, grossTotal: total }));
+  }, [stageInv.baseAmount, stageInv.gst, stageInv.whTax, stageInv.fed]);
+
+  // --- FIREBASE & AUTH ---
+  useEffect(() => {
+    const initApp = async () => {
+        if (Object.keys(firebaseConfig).length === 0) {
+            setError("Firebase config missing."); 
+            setIsLoading(false);
+            return;
+        }
+        try {
+            const app = initializeApp(firebaseConfig);
+            const auth = getAuth(app);
+            const firestore = getFirestore(app);
+            setDb(firestore);
+
+            // Connect directly to your custom Firebase Database
+            await signInAnonymously(auth);
+            
+            onAuthStateChanged(auth, (u) => {
+                if (u) {
+                  setUser(u);
+                  setIsLoading(false);
+                }
+            });
+        } catch (e) {
+            console.error("Auth Error:", e);
+            setError("Authentication failed. Please ensure 'Anonymous' Sign-In is enabled in Firebase.");
+            setIsLoading(false);
+        }
+    };
+    initApp();
+  }, []);
+
+  // --- DATA SYNCING ---
+  useEffect(() => {
+    if (!db || !user) return; 
+
+    // Sync POs
+    const unsubPo = onSnapshot(
+        collection(db, 'artifacts', currentLedgerId, 'public', 'data', 'purchaseOrders'), 
+        (snapshot) => {
+            const data = snapshot.docs.map(doc => {
+                const d = doc.data();
+                const dcs = Array.isArray(d.dcs) ? d.dcs : (d.dcNo ? [{ id: 'leg-dc', dcNo: d.dcNo, dcDate: d.dcDate }] : []);
+                
+                const rawInvoices = Array.isArray(d.invoices) ? d.invoices : (d.number || d.amount ? [{ 
+                    id: 'leg-inv', number: d.number, date: d.date, amount: d.amount, note: d.note, isAOS: d.isAOS,
+                    baseAmount: d.amount, gst: 0, whTax: 0, fed: 0 
+                }] : []);
+
+                const invoices = rawInvoices.map(inv => ({
+                    ...inv,
+                    baseAmount: inv.baseAmount !== undefined ? inv.baseAmount : inv.amount,
+                    gst: inv.gst || 0,
+                    whTax: inv.whTax || 0,
+                    fed: inv.fed || 0,
+                    amount: parseFloat(inv.amount || inv.totalAmount || 0)
+                }));
+                
+                return { id: doc.id, ...d, dcs, invoices };
+            });
+            setPoData(data);
+            setError(null);
+        }, 
+        (err) => {
+            console.error("Sync Error:", err);
+            setError(`Sync Error: ${err.message || 'Permission denied'}`);
+        }
+    );
+
+    // Sync Legacy
+    const unsubLegacy = onSnapshot(
+        collection(db, 'artifacts', currentLedgerId, 'public', 'data', 'invoices'), 
+        (snapshot) => {
+            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setLegacyData(data);
+        }, 
+        (err) => console.error("Legacy Sync Error:", err)
+    );
+
+    // Sync Payments
+    const unsubPayments = onSnapshot(
+        collection(db, 'artifacts', currentLedgerId, 'public', 'data', 'payments'), 
+        (snapshot) => {
+            const pMap = {};
+            snapshot.docs.forEach(doc => { pMap[doc.id] = doc.data(); });
+            setPaymentData(pMap);
+        }, 
+        (err) => console.error("Payment Sync Error:", err)
+    );
+
+    return () => { unsubPo(); unsubLegacy(); unsubPayments(); };
+  }, [db, user, currentLedgerId]);
+
+  // --- DATA MERGING ---
+  const transactions = useMemo(() => {
+      return poData;
+  }, [poData]);
+
+  // --- FILTERED TRANSACTIONS ---
+  const filteredTransactions = useMemo(() => {
+      let result = transactions;
+      if (dateFilter.start || dateFilter.end) {
+          const start = dateFilter.start ? dateFilter.start : '0000-01-01';
+          const end = dateFilter.end ? dateFilter.end : '9999-12-31';
+          
+          result = result.filter(t => {
+              // Check invoices first
+              if (t.invoices && t.invoices.length > 0) {
+                   return t.invoices.some(inv => inv.date >= start && inv.date <= end);
+              }
+              // Fallback to PO date
+              return t.poDate >= start && t.poDate <= end;
+          });
+      }
+      return result;
+  }, [transactions, dateFilter]);
+
+  // --- STATS CALCULATION ---
+  const stats = useMemo(() => {
+      const now = new Date();
+      let startFilter, endFilter;
+      let label = "";
+
+      if (dateFilter.start && dateFilter.end) {
+          startFilter = new Date(dateFilter.start);
+          endFilter = new Date(dateFilter.end);
+          endFilter.setHours(23, 59, 59, 999);
+          label = "(Selected Range)";
+      } else {
+          // Default to Current Month
+          const y = now.getFullYear();
+          const m = now.getMonth();
+          startFilter = new Date(y, m, 1);
+          endFilter = new Date(y, m + 1, 0, 23, 59, 59, 999);
+          label = "(Current Month)";
+      }
+
+      let purchasing = 0;
+      let totalInv = 0;
+      let aosInv = 0;
+      let payable = 0;
+      let openPoValue = 0;
+
+      transactions.forEach(t => {
+          // 1. Open PO Value (Estimated)
+          if(t.poDate) {
+              const poDateObj = new Date(t.poDate + 'T00:00:00');
+              const isPoInRange = poDateObj >= startFilter && poDateObj <= endFilter;
+              
+              if (isPoInRange) {
+                  const hasValidInvoice = t.invoices && t.invoices.length > 0 && t.invoices.some(inv => parseFloat(inv.amount) > 0);
+                  if (!hasValidInvoice) {
+                      openPoValue += (parseFloat(t.poAmount) || 0);
+                  }
+              }
+          }
+
+          // 2. Invoice Stats
+          t.invoices.forEach(inv => {
+              if(!inv.date) return;
+              const invDate = new Date(inv.date + 'T00:00:00');
+              
+              if (invDate >= startFilter && invDate <= endFilter) {
+                  const baseVal = parseFloat(inv.baseAmount);
+                  const valToAdd = !isNaN(baseVal) ? baseVal : (parseFloat(inv.amount) || 0);
+                  purchasing += valToAdd;
+                  
+                  totalInv++;
+                  if(inv.isAOS) aosInv++;
+              }
+
+              const payableMonthISO = getPayableMonth(inv.date);
+              if (payableMonthISO) {
+                  const payableDate = new Date(payableMonthISO + '-01'); 
+                  if (dateFilter.start && dateFilter.end) {
+                       if (payableDate >= startFilter && payableDate <= endFilter) {
+                           payable += (parseFloat(inv.amount)||0);
+                       }
+                  } else {
+                       const currentMonthKey = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}`;
+                       if (payableMonthISO === currentMonthKey) {
+                           payable += (parseFloat(inv.amount)||0);
+                       }
+                  }
+              }
+          });
+      });
+      return { purchasing, totalInv, aosInv, payable, openPoValue, aosPerc: totalInv > 0 ? Math.round((aosInv / totalInv) * 100) : 0, label };
+  }, [transactions, dateFilter]);
+
+  // --- REPORT LIST: OPEN POS ---
+  const openPoList = useMemo(() => {
+      let startStr = "0000-01-01";
+      let endStr = "9999-12-31";
+
+      if (dateFilter.start && dateFilter.end) {
+          startStr = dateFilter.start;
+          endStr = dateFilter.end;
+      } else {
+          const now = new Date();
+          const currentMonthKey = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}`;
+          startStr = `${currentMonthKey}-01`;
+          endStr = `${currentMonthKey}-31`;
+      }
+
+      return transactions.filter(t => {
+          if (!t.poDate) return false;
+          if (t.poDate < startStr || t.poDate > endStr) return false;
+          const hasValidInvoice = t.invoices && t.invoices.length > 0 && t.invoices.some(inv => parseFloat(inv.amount) > 0);
+          return !hasValidInvoice;
+      }).sort((a,b) => a.poDate.localeCompare(b.poDate));
+  }, [transactions, dateFilter]);
+
+  // --- SUMMARY DATA ---
+  const summaryData = useMemo(() => {
+      const grouping = {};
+      transactions.forEach(t => {
+          t.invoices.forEach(inv => {
+              if (!inv.date || !inv.amount) return;
+              const monthKey = getPayableMonth(inv.date);
+              const batch = getPaymentBatch(inv.date); 
+              if (!grouping[monthKey]) {
+                  grouping[monthKey] = {
+                      monthKey, label: getDisplayMonth(monthKey),
+                      run1: 0, run2: 0, run3: 0,
+                      Dha: 0, Jt: 0, Qr: 0, aosTotal: 0, Total: 0,
+                      paidRun1: paymentData[monthKey]?.run1 || 0,
+                      paidRun2: paymentData[monthKey]?.run2 || 0,
+                      paidRun3: paymentData[monthKey]?.run3 || 0,
+                  };
+              }
+              const amt = parseFloat(inv.amount)||0;
+              if (batch === 'Run 1') grouping[monthKey].run1 += amt;
+              else if (batch === 'Run 2') grouping[monthKey].run2 += amt;
+              else if (batch === 'Run 3') grouping[monthKey].run3 += amt;
+              
+              if (grouping[monthKey][t.outlet] !== undefined) grouping[monthKey][t.outlet] += amt;
+              if (inv.isAOS) grouping[monthKey].aosTotal += amt;
+              grouping[monthKey].Total += amt;
+          });
+      });
+      Object.keys(paymentData).forEach(mKey => {
+           if(!grouping[mKey]) {
+               grouping[mKey] = {
+                   monthKey: mKey, label: getDisplayMonth(mKey),
+                   run1: 0, run2: 0, run3: 0, Dha: 0, Jt: 0, Qr: 0, aosTotal: 0, Total: 0,
+                   paidRun1: paymentData[mKey].run1 || 0,
+                   paidRun2: paymentData[mKey].run2 || 0,
+                   paidRun3: paymentData[mKey].run3 || 0,
+               };
+           }
+      });
+
+      return Object.values(grouping).sort((a,b) => a.monthKey.localeCompare(b.monthKey));
+  }, [transactions, paymentData]);
+
+  // --- ACTIONS ---
+
+  const handleAutoGenerate = () => {
+      const nextId = generateNextPoNumber(transactions, activeBranchTab);
+      setCurrentPo({ ...currentPo, poNo: nextId, outlet: activeBranchTab });
+      setCurrentAction('ADD');
+      setError(null);
+  };
+
+  const handlePoLookup = () => {
+    const poNo = currentPo.poNo.trim();
+    // Lookup restricted to active branch
+    const outlet = activeBranchTab; 
+
+    if (!poNo) return;
+    
+    // Strict lookup: Outlet + PO
+    const existing = transactions.find(t => t.poNo === poNo && t.outlet === outlet);
+    
+    if (existing) {
+        setCurrentPo({ ...existing, dcs: existing.dcs||[], invoices: existing.invoices||[] });
+        setCurrentAction('UPDATE');
+        setError(null);
+    } else {
+        // New Entry
+        setCurrentPo(prev => ({ ...prev, outlet: activeBranchTab }));
+        setCurrentAction('ADD');
+        setError(null);
+    }
+  };
+
+  const addDcToStage = () => {
+      if (!stageDc.dcNo || !stageDc.dcDate) return; 
+      setCurrentPo(prev => ({ ...prev, dcs: [...prev.dcs, { ...stageDc, id: Date.now().toString() }] }));
+      setStageDc(EMPTY_DC_INPUT); 
+  };
+
+  const removeDc = (id) => {
+      setCurrentPo(prev => ({ ...prev, dcs: prev.dcs.filter(d => d.id !== id) }));
+  };
+
+  const addInvToStage = () => {
+      if (!stageInv.baseAmount || !stageInv.date) {
+          setError("Invoice Date and Base Amount are required.");
+          return;
+      }
+      
+      const newInv = { 
+          ...stageInv, 
+          id: Date.now().toString(), 
+          baseAmount: parseFloat(stageInv.baseAmount) || 0,
+          gst: parseFloat(stageInv.gst) || 0,
+          whTax: parseFloat(stageInv.whTax) || 0,
+          fed: parseFloat(stageInv.fed) || 0,
+          amount: parseFloat(stageInv.amount) || 0 
+      };
+      
+      setCurrentPo(prev => ({ ...prev, invoices: [...prev.invoices, newInv] }));
+      setStageInv(EMPTY_INV_INPUT);
+      setError(null);
+  };
+
+  const removeInv = (id) => {
+      setCurrentPo(prev => ({ ...prev, invoices: prev.invoices.filter(i => i.id !== id) }));
+  };
+
+  const handleSave = async () => {
+      if (!currentPo.poNo || !user || !db) { setError("PO Number required."); return; }
+      
+      const docId = generateCompositeId(currentPo.outlet, currentPo.poNo);
+      
+      try {
+          await setDoc(doc(db, 'artifacts', currentLedgerId, 'public', 'data', 'purchaseOrders', docId), {
+              ...currentPo,
+              enteredBy: user.uid,
+              lastUpdated: new Date().toISOString(),
+              status: currentPo.invoices.length > 0 ? 'Invoiced' : 'Pending'
+          });
+          // Reset form but keep outlet
+          setCurrentPo({ ...EMPTY_PO_STATE, outlet: currentPo.outlet });
+          setStageDc(EMPTY_DC_INPUT);
+          setStageInv(EMPTY_INV_INPUT);
+          setCurrentAction('ADD');
+          setError(null);
+      } catch (e) { setError(`Save failed: ${e.message}`); }
+  };
+
+  const handleDelete = async (id) => {
+      if(!db || !user) return;
+      try {
+          await deleteDoc(doc(db, 'artifacts', currentLedgerId, 'public', 'data', 'purchaseOrders', id));
+          if (currentPo.id === id || generateCompositeId(currentPo.outlet, currentPo.poNo) === id) {
+              setCurrentPo({ ...EMPTY_PO_STATE, outlet: currentPo.outlet });
+              setCurrentAction('ADD');
+          }
+      } catch (e) { setError("Delete failed."); }
+  };
+
+  const handleSavePayment = async (monthKey) => {
+      if (!db || !user) return;
+      try {
+          await setDoc(doc(db, 'artifacts', currentLedgerId, 'public', 'data', 'payments', monthKey), {
+              run1: parseFloat(editingPayment.run1) || 0,
+              run2: parseFloat(editingPayment.run2) || 0,
+              run3: parseFloat(editingPayment.run3) || 0,
+              updatedBy: user.uid, updatedAt: new Date().toISOString()
+          }, { merge: true });
+          setEditingPayment({ monthKey: null, run1: 0, run2: 0, run3: 0 });
+      } catch (e) { setError("Payment update failed."); }
+  };
+
+  // --- DATA EXPORT ---
+  const downloadCSV = () => {
+    let dataToExport = transactions;
+    if (activeTab === 'entry') {
+        dataToExport = transactions.filter(t => t.outlet === activeBranchTab);
+    }
+    
+    if (dataToExport.length === 0) return;
+    const headers = ["PO #", "Outlet", "PO Date", "PO Amount (Est)", "DC #", "DC Date", "Inv #", "Inv Date", "Base Amt", "GST", "WH", "FED", "Total", "AOS Type", "Note", "Payable Month (N+3)", "Batch Run", "Status"];
+    let rows = [headers.join(",")];
+
+    dataToExport.forEach(t => {
+        if (t.invoices && t.invoices.length > 0) {
+            t.invoices.forEach(inv => {
+                const payableMonthISO = getPayableMonth(inv.date);
+                rows.push([
+                    `"${t.poNo}"`, t.outlet, formatDisplayDate(t.poDate), t.poAmount || 0,
+                    (t.dcs||[]).map(d => d.dcNo).join('; '), (t.dcs||[]).map(d => formatDisplayDate(d.dcDate)).join('; '),
+                    `"${inv.number||''}"`, formatDisplayDate(inv.date), 
+                    inv.baseAmount, inv.gst, inv.whTax, inv.fed, inv.amount,
+                    inv.isAOS ? 'Yes' : 'No', `"${inv.note||''}"`,
+                    `"${getDisplayMonth(payableMonthISO)}"`, getPaymentBatch(inv.date), t.status
+                ].join(","));
+            });
+        } else if (t.dcs && t.dcs.length > 0) {
+            t.dcs.forEach(dc => {
+                rows.push([
+                    `"${t.poNo}"`, t.outlet, formatDisplayDate(t.poDate), t.poAmount || 0,
+                    dc.dcNo, formatDisplayDate(dc.dcDate),
+                    '', '', 0, 0, 0, 0, 0, '', '', '', '', t.status
+                ].join(","));
+            });
+        } else {
+             rows.push([`"${t.poNo}"`, t.outlet, formatDisplayDate(t.poDate), t.poAmount || 0, '', '', '', '', 0, 0, 0, 0, 0, '', '', '', '', t.status].join(","));
+        }
+    });
+
+    const blob = new Blob([rows.join("\n")], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `P2P_Manager_Export.csv`;
+    a.click();
+  };
+  
+  // --- DATA IMPORT ---
+  const handleImportCSV = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setIsLoading(true);
+    
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+        try {
+            const text = event.target.result;
+            const rows = parseCSV(text);
+            if (rows.length < 2) throw new Error("File is empty or invalid format.");
+            
+            const headers = rows[0].map(h => h.trim());
+            const poMap = {};
+            
+            const getVal = (row, colName) => {
+                const idx = headers.indexOf(colName);
+                if(idx === -1) return '';
+                return (row[idx] || '').trim();
+            };
+
+            rows.slice(1).forEach(row => {
+                if (row.length < 5) return; // Skip completely empty trailing rows
+                
+                const poNo = getVal(row, "PO #");
+                const outlet = getVal(row, "Outlet");
+                if (!poNo || !outlet) return;
+
+                const id = generateCompositeId(outlet, poNo);
+                
+                // Initialize PO structure if we haven't seen this ID in the CSV yet
+                if (!poMap[id]) {
+                    let poDateStr = getVal(row, "PO Date");
+                    if (poDateStr.includes('/')) {
+                        const p = poDateStr.split('/');
+                        if (p.length === 3) poDateStr = `${p[2]}-${p[1]}-${p[0]}`;
+                    }
+                    poMap[id] = {
+                        poNo, outlet, poDate: poDateStr,
+                        // FIX: Look for either column name from the two different export types
+                        poAmount: parseFloat(getVal(row, "PO Amount (Est)")) || parseFloat(getVal(row, "Estimated Amount")) || 0
+                    };
+                    
+                    // Safety check: Only initialize empty arrays if the CSV actually contains these columns.
+                    // This prevents wiping out existing DB data when importing simplified reports.
+                    if (headers.includes("DC #")) poMap[id].dcs = [];
+                    if (headers.includes("Inv #")) poMap[id].invoices = [];
+                }
+
+                // Process DCs
+                if (headers.includes("DC #")) {
+                    const dcNos = getVal(row, "DC #").split(';').map(s=>s.trim()).filter(Boolean);
+                    const dcDates = getVal(row, "DC Date").split(';').map(s=>s.trim()).filter(Boolean);
+                    dcNos.forEach((dcNo, idx) => {
+                        let dDate = dcDates[idx] || '';
+                        if (dDate.includes('/')) {
+                            const p = dDate.split('/');
+                            if (p.length === 3) dDate = `${p[2]}-${p[1]}-${p[0]}`;
+                        }
+                        if (!poMap[id].dcs.some(d => d.dcNo === dcNo)) {
+                            poMap[id].dcs.push({ id: Date.now() + Math.random().toString(), dcNo, dcDate: dDate });
+                        }
+                    });
+                }
+
+                // Process Invoices
+                if (headers.includes("Inv #")) {
+                    const invNo = getVal(row, "Inv #");
+                    let invDate = getVal(row, "Inv Date");
+                    if (invDate.includes('/')) {
+                        const p = invDate.split('/');
+                        if (p.length === 3) invDate = `${p[2]}-${p[1]}-${p[0]}`;
+                    }
+                    const total = parseFloat(getVal(row, "Total")) || 0;
+                    
+                    if (invNo || total > 0) {
+                        if (!poMap[id].invoices.some(i => i.number === invNo && i.amount === total)) {
+                            poMap[id].invoices.push({
+                                id: Date.now() + Math.random().toString(),
+                                number: invNo,
+                                date: invDate,
+                                baseAmount: parseFloat(getVal(row, "Base Amt")) || 0,
+                                gst: parseFloat(getVal(row, "GST")) || 0,
+                                whTax: parseFloat(getVal(row, "WH")) || 0,
+                                fed: parseFloat(getVal(row, "FED")) || 0,
+                                amount: total,
+                                isAOS: getVal(row, "AOS Type").toLowerCase() === 'yes',
+                                note: getVal(row, "Note")
+                            });
+                        }
+                    }
+                }
+            });
+
+            // Write all found POs to Firebase
+            const batchPromises = Object.entries(poMap).map(([id, poDataObj]) => {
+                if (poDataObj.invoices !== undefined) {
+                    poDataObj.status = poDataObj.invoices.length > 0 ? 'Invoiced' : 'Pending';
+                }
+                return setDoc(doc(db, 'artifacts', currentLedgerId, 'public', 'data', 'purchaseOrders', id), {
+                    ...poDataObj,
+                    enteredBy: user?.uid || 'imported',
+                    lastUpdated: new Date().toISOString()
+                }, { merge: true });
+            });
+
+            await Promise.all(batchPromises);
+            setError("Import completed successfully!");
+            setTimeout(() => setError(null), 4000);
+            
+        } catch(err) {
+            setError("Import failed: " + err.message);
+        } finally {
+            setIsLoading(false);
+            e.target.value = null; // reset file input so the same file can be selected again
+        }
+    };
+    reader.readAsText(file);
+  };
+  
+  const downloadOpenPoReport = () => {
+    if (openPoList.length === 0) return;
+    const headers = ["PO #", "Outlet", "PO Date", "Estimated Amount", "Status"];
+    const rows = [headers.join(",")];
+    openPoList.forEach(t => {
+        rows.push([`"${t.poNo}"`, t.outlet, t.poDate, t.poAmount || 0, "Open"].join(","));
+    });
+    const blob = new Blob([rows.join("\n")], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = "OpenPO_Report.csv";
+    a.click();
+  };
+  
+  const handlePrintReport = () => {
+      window.print();
+  };
+
+  if (isLoading) return <div className="p-10 text-center text-blue-600 font-bold">Processing Data...</div>;
+
+  return (
+    <div className="max-w-7xl mx-auto bg-gray-50 min-h-screen p-4 font-sans text-gray-800">
+      
+      {/* HEADER */}
+      <div className="bg-slate-900 text-white p-6 rounded-t-xl shadow-lg mb-6 flex flex-col md:flex-row justify-between items-center gap-4 print:hidden">
+        <div>
+            <h1 className="text-2xl font-bold flex items-center gap-2"><DollarSign /> P2P Manager (Multi-DC/Inv)</h1>
+            <div className="flex items-center gap-2 mt-1">
+                <span className="text-slate-400 text-xs">Ledger ID:</span>
+                <input 
+                    type="text" 
+                    value={currentLedgerId}
+                    onChange={(e) => setCurrentLedgerId(e.target.value)}
+                    className="bg-slate-800 text-white text-xs p-1 rounded border border-slate-700 w-64 font-mono"
+                    title="Paste your Ledger ID here to recover data"
+                />
+            </div>
+        </div>
+        
+        {/* DATE FILTER */}
+        <div className="flex items-center gap-2 bg-slate-800 p-1.5 rounded border border-slate-700">
+            <Filter size={14} className="text-slate-400 ml-1" />
+            <input type="date" value={dateFilter.start} onChange={e => setDateFilter({...dateFilter, start: e.target.value})} className="bg-transparent text-white text-xs outline-none w-24" />
+            <span className="text-slate-500">-</span>
+            <input type="date" value={dateFilter.end} onChange={e => setDateFilter({...dateFilter, end: e.target.value})} className="bg-transparent text-white text-xs outline-none w-24" />
+            {(dateFilter.start || dateFilter.end) && <button onClick={() => setDateFilter({start:'', end:''})} className="text-red-400 p-1"><X size={14}/></button>}
+        </div>
+
+        <div className="flex gap-2">
+            <input type="file" accept=".csv" id="csv-upload" className="hidden" onChange={handleImportCSV} />
+            <label htmlFor="csv-upload" className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 cursor-pointer text-white">
+                <Upload size={14} /> Import
+            </label>
+            <button onClick={downloadCSV} className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2">
+                <Download size={14} /> Export {activeTab === 'entry' ? activeBranchTab : ''}
+            </button>
+            <button onClick={() => { setCurrentPo({ ...EMPTY_PO_STATE, outlet: activeBranchTab }); setCurrentAction('ADD'); }} className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2">
+                <RefreshCw size={14} /> Clear / New
+            </button>
+        </div>
+      </div>
+
+      {error && <div className={`p-3 rounded mb-4 text-sm font-semibold print:hidden ${error.includes("successful") ? 'bg-green-100 text-green-800 border-l-4 border-green-500' : 'bg-yellow-100 text-yellow-800 border-l-4 border-yellow-500'}`}>{String(error)}</div>}
+
+      {/* TABS */}
+      <div className="flex gap-2 mb-6 border-b border-gray-200 print:hidden">
+          <button onClick={() => setActiveTab('entry')} className={`px-4 py-2 font-bold text-sm rounded-t-lg ${activeTab==='entry' ? 'bg-white text-blue-600 border-t border-x' : 'text-gray-500 hover:bg-gray-100'}`}>1. PO Management</button>
+          <button onClick={() => setActiveTab('summary')} className={`px-4 py-2 font-bold text-sm rounded-t-lg ${activeTab==='summary' ? 'bg-white text-blue-600 border-t border-x' : 'text-gray-500 hover:bg-gray-100'}`}>2. HO Summary</button>
+          <button onClick={() => setActiveTab('reconcile')} className={`px-4 py-2 font-bold text-sm rounded-t-lg ${activeTab==='reconcile' ? 'bg-white text-blue-600 border-t border-x' : 'text-gray-500 hover:bg-gray-100'}`}>3. Payments</button>
+          <button onClick={() => setActiveTab('reports')} className={`px-4 py-2 font-bold text-sm rounded-t-lg ${activeTab==='reports' ? 'bg-white text-blue-600 border-t border-x' : 'text-gray-500 hover:bg-gray-100'}`}>4. Reports</button>
+      </div>
+
+      {activeTab === 'entry' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            {/* SUB-TABS FOR BRANCHES */}
+            <div className="lg:col-span-12 mb-2 flex gap-1">
+                {OUTLETS.map(outlet => (
+                    <button 
+                        key={outlet}
+                        onClick={() => {
+                            setActiveBranchTab(outlet);
+                            // Reset form to avoid confusion when switching branches
+                            setCurrentPo({ ...EMPTY_PO_STATE, outlet: outlet });
+                            setCurrentAction('ADD');
+                        }}
+                        className={`px-6 py-2 rounded-full text-xs font-bold uppercase tracking-wider transition-all ${activeBranchTab === outlet ? 'bg-slate-800 text-white shadow-md' : 'bg-white text-slate-500 hover:bg-slate-100'}`}
+                    >
+                        {outlet} Branch
+                    </button>
+                ))}
+            </div>
+
+            {/* KPI ROW */}
+            <div className="lg:col-span-12 grid grid-cols-1 md:grid-cols-4 gap-4 mb-2">
+                 <div className="bg-amber-50 p-4 rounded-lg border-l-4 border-amber-500 shadow-sm flex items-center justify-between">
+                    <div>
+                        <p className="text-xs font-bold text-amber-500 uppercase tracking-wider">Open PO Value {stats.label}</p>
+                        <p className="text-xl font-extrabold text-amber-900 mt-1">{formatCurrency(stats.openPoValue)}</p>
+                    </div>
+                    <FileText className="text-amber-200 w-8 h-8" />
+                 </div>
+                 <div className="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500 shadow-sm flex items-center justify-between">
+                    <div>
+                        <p className="text-xs font-bold text-blue-400 uppercase tracking-wider">Base Purchasing {stats.label}</p>
+                        <p className="text-xl font-extrabold text-blue-900 mt-1">{formatCurrency(stats.purchasing)}</p>
+                    </div>
+                    <Activity className="text-blue-200 w-8 h-8" />
+                 </div>
+                 <div className="bg-indigo-50 p-4 rounded-lg border-l-4 border-indigo-500 shadow-sm flex items-center justify-between">
+                    <div>
+                        <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider">AOS Invoices {stats.label}</p>
+                        <div className="flex items-baseline gap-2 mt-1">
+                            <p className="text-xl font-extrabold text-indigo-900">{stats.aosPerc}%</p>
+                            <p className="text-xs text-indigo-600 font-semibold">({stats.aosInv} of {stats.totalInv})</p>
+                        </div>
+                    </div>
+                    <PieChart className="text-indigo-200 w-8 h-8" />
+                 </div>
+                 <div className="bg-green-50 p-4 rounded-lg border-l-4 border-green-500 shadow-sm flex items-center justify-between">
+                    <div>
+                        <p className="text-xs font-bold text-green-500 uppercase tracking-wider">Payable {stats.label}</p>
+                        <p className="text-xl font-extrabold text-green-900 mt-1">{formatCurrency(stats.payable)}</p>
+                    </div>
+                    <DollarSign className="text-green-200 w-8 h-8" />
+                 </div>
+            </div>
+
+            {/* --- LEFT COLUMN: INPUT FORM --- */}
+            <div className="lg:col-span-5 space-y-4">
+                
+                {/* 1. MASTER PO CARD */}
+                <div className="bg-white p-5 rounded-lg shadow border border-blue-100">
+                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
+                        <Hash size={16} /> 1. PO Master Data ({activeBranchTab})
+                    </h3>
+                    <div className="mb-4">
+                        <label className="text-xs font-bold text-gray-400 uppercase">PO Number (Key)</label>
+                        <div className="flex gap-2 mt-1">
+                            <input type="text" value={currentPo.poNo} onChange={e => setCurrentPo({...currentPo, poNo: e.target.value})} onBlur={handlePoLookup} onKeyDown={(e) => e.key === 'Enter' && handlePoLookup()} placeholder="25/0001" className="flex-1 p-2 border-2 border-blue-200 rounded font-mono font-bold focus:border-blue-500 outline-none" disabled={currentAction === 'UPDATE'} />
+                            <button onClick={handlePoLookup} className="bg-gray-100 hover:bg-gray-200 p-2 rounded text-gray-600 border"><Search size={18} /></button>
+                            {currentAction === 'ADD' && <button onClick={handleAutoGenerate} className="bg-blue-100 hover:bg-blue-200 text-blue-700 p-2 rounded text-xs font-bold whitespace-nowrap">Auto</button>}
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                        <div>
+                            <label className="text-xs font-bold text-gray-400 uppercase">Outlet</label>
+                            <div className="relative">
+                                <select value={activeBranchTab} disabled={true} className="w-full p-2 mt-1 border rounded bg-gray-100 outline-none text-gray-500 cursor-not-allowed">{OUTLETS.map(o => <option key={o} value={o}>{o}</option>)}</select>
+                                <Lock size={12} className="absolute right-2 top-4 text-gray-400" />
+                            </div>
+                        </div>
+                        <div>
+                            <label className="text-xs font-bold text-gray-400 uppercase">PO Date</label>
+                            <input type="date" value={currentPo.poDate} onChange={e => setCurrentPo({...currentPo, poDate: e.target.value})} className={`w-full p-2 mt-1 border rounded outline-none ${currentAction === 'UPDATE' ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : ''}`} disabled={currentAction === 'UPDATE'} />
+                        </div>
+                    </div>
+                     <div>
+                        <label className="text-xs font-bold text-amber-600 uppercase">PO Amount (Est.)</label>
+                        <input type="number" value={currentPo.poAmount || ''} onChange={e => setCurrentPo({...currentPo, poAmount: e.target.value})} className={`w-full p-2 mt-1 border rounded outline-none font-bold text-amber-700 ${currentAction === 'UPDATE' ? 'bg-gray-100 cursor-not-allowed' : ''}`} placeholder="0.00" disabled={currentAction === 'UPDATE'} />
+                    </div>
+                </div>
+
+                {/* 2. DELIVERY CHALLANS CARD */}
+                <div className="bg-white p-5 rounded-lg shadow border border-orange-100 relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-orange-400"></div>
+                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-3 flex items-center gap-2"><TrendingUp size={16} className="text-orange-500" /> 2. Delivery Challans</h3>
+                    <div className="flex gap-2 mb-3 items-end bg-orange-50 p-3 rounded">
+                        <div className="flex-1"><label className="text-[10px] font-bold text-gray-400 uppercase">DC #</label><input type="text" placeholder="25/0001" value={stageDc.dcNo} onChange={e => setStageDc({...stageDc, dcNo: e.target.value})} className="w-full p-1 border rounded text-sm" /></div>
+                        <div className="flex-1"><label className="text-[10px] font-bold text-gray-400 uppercase">Date</label><input type="date" value={stageDc.dcDate} onChange={e => setStageDc({...stageDc, dcDate: e.target.value})} className="w-full p-1 border rounded text-sm" /></div>
+                        <button onClick={addDcToStage} className="bg-orange-500 hover:bg-orange-600 text-white p-1.5 rounded"><Plus size={16} /></button>
+                    </div>
+                    <div className="space-y-2 max-h-32 overflow-y-auto">
+                        {(currentPo.dcs||[]).map((dc, idx) => (
+                            <div key={idx} className="flex justify-between items-center text-sm p-2 bg-gray-50 rounded border-l-2 border-orange-300">
+                                <span><span className="font-mono font-bold">{dc.dcNo}</span> <span className="text-gray-400 mx-1">|</span> {formatDisplayDate(dc.dcDate)}</span>
+                                {currentAction === 'ADD' && <button onClick={() => removeDc(dc.id)} className="text-red-400 hover:text-red-600"><Trash2 size={14} /></button>}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* 3. INVOICES CARD - UPDATED WITH TAX FIELDS */}
+                <div className="bg-white p-5 rounded-lg shadow border border-green-100 relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-green-500"></div>
+                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-3 flex items-center gap-2"><DollarSign size={16} className="text-green-500" /> 3. Invoice & Tax Breakdown</h3>
+                    <div className="bg-green-50 p-3 rounded mb-3 space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                            <div><label className="text-[10px] font-bold text-gray-400 uppercase">Inv #</label><input type="text" value={stageInv.number} onChange={e => setStageInv({...stageInv, number: e.target.value})} className="w-full p-1 border rounded text-sm" /></div>
+                            <div><label className="text-[10px] font-bold text-gray-400 uppercase">Date</label><input type="date" value={stageInv.date} onChange={e => setStageInv({...stageInv, date: e.target.value})} className="w-full p-1 border rounded text-sm" /></div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                             <div><label className="text-[10px] font-bold text-blue-600 uppercase">Base Invoice</label><input type="number" value={stageInv.baseAmount} onChange={e => setStageInv({...stageInv, baseAmount: e.target.value})} className="w-full p-1 border border-blue-200 rounded text-sm font-bold" placeholder="0.00" /></div>
+                             <div><label className="text-[10px] font-bold text-gray-400 uppercase">G.S.T</label><input type="number" value={stageInv.gst} onChange={e => setStageInv({...stageInv, gst: e.target.value})} className="w-full p-1 border rounded text-sm" placeholder="0" /></div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                             <div><label className="text-[10px] font-bold text-gray-400 uppercase">W.H.</label><input type="number" value={stageInv.whTax} onChange={e => setStageInv({...stageInv, whTax: e.target.value})} className="w-full p-1 border rounded text-sm" placeholder="0" /></div>
+                             <div><label className="text-[10px] font-bold text-gray-400 uppercase">F.E.D</label><input type="number" value={stageInv.fed} onChange={e => setStageInv({...stageInv, fed: e.target.value})} className="w-full p-1 border rounded text-sm" placeholder="0" /></div>
+                        </div>
+                        <div className="flex items-center justify-between pt-2 border-t border-green-200">
+                            <div><label className="text-[9px] font-bold text-green-700 uppercase">Total Payable</label><div className="text-lg font-black text-green-800">{formatCurrency(stageInv.amount)}</div></div>
+                            <div className="flex flex-col items-end">
+                                <label className="flex items-center text-xs text-gray-600 cursor-pointer mb-2"><input type="checkbox" checked={stageInv.isAOS} onChange={e => setStageInv({...stageInv, isAOS: e.target.checked})} className="mr-1.5" /> AOS</label>
+                                <button onClick={addInvToStage} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-xs font-bold flex items-center gap-1"><Plus size={12} /> Add</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="space-y-2 max-h-32 overflow-y-auto">
+                        {(currentPo.invoices||[]).map((inv, idx) => (
+                            <div key={idx} className="flex justify-between items-center text-sm p-2 bg-gray-50 rounded border-l-2 border-green-300">
+                                <div><div className="font-mono font-bold text-green-800">{formatCurrency(inv.amount)}</div><div className="text-[10px] text-gray-500">#{inv.number} | Base: {formatCurrency(inv.baseAmount)} {inv.isAOS && <span className="text-green-600 font-bold bg-green-100 px-1 rounded ml-1">AOS</span>}</div></div>
+                                {currentAction === 'ADD' && <button onClick={() => removeInv(inv.id)} className="text-red-400 hover:text-red-600"><Trash2 size={14} /></button>}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <button onClick={handleSave} disabled={!currentPo.poNo} className="w-full bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-lg shadow-lg font-bold flex justify-center items-center gap-2 disabled:bg-gray-300"><Save size={18} /> {currentAction === 'ADD' ? 'Save New PO Record' : 'Add New Entries to PO'}</button>
+            </div>
+
+            {/* --- RIGHT COLUMN: TRACKING LIST --- */}
+            <div className="lg:col-span-7">
+                <div className="bg-white rounded-lg shadow overflow-hidden border border-gray-200">
+                    <div className="p-4 bg-gray-50 border-b flex justify-between items-center">
+                        <h3 className="font-bold text-gray-700">Journal ({activeBranchTab})</h3>
+                        <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">{filteredTransactions.filter(t => t.outlet === activeBranchTab).length} Records</span>
+                    </div>
+                    <div className="overflow-x-auto overflow-y-auto max-h-[800px]">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-gray-100 text-xs uppercase text-gray-500 font-semibold sticky top-0 z-10">
+                                <tr><th className="p-3 bg-gray-100">PO #</th><th className="p-3 bg-gray-100">Date</th><th className="p-3 bg-gray-100">Summary</th><th className="p-3 text-center bg-gray-100">Action</th></tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {[...filteredTransactions]
+                                    .filter(t => t.outlet === activeBranchTab)
+                                    .sort((a,b) => (b.poNo||'').localeCompare(a.poNo||''))
+                                    .map(t => (
+                                    <tr key={t.id} className="hover:bg-blue-50 transition cursor-default group">
+                                        <td className="p-3 align-top"><div className="font-mono font-bold text-blue-600">{t.poNo}</div></td>
+                                        <td className="p-3 align-top"><div className="text-xs text-gray-400">{formatDisplayDate(t.poDate)}</div></td>
+                                        <td className="p-3"><div className="flex gap-4">
+                                            <div className="text-xs"><span className="font-bold text-orange-600 block">{(t.dcs||[]).length} DCs</span><span className="text-gray-400">{(t.dcs||[]).map(d=>d.dcNo).join(', ').substring(0,15)}{(t.dcs||[]).length>1?'...':''}</span></div>
+                                            <div className="text-xs"><span className="font-bold text-green-600 block">{(t.invoices||[]).length} Invoices</span><span className="font-mono">{formatCurrency((t.invoices||[]).reduce((s,i)=>s+(parseFloat(i.amount)||0),0))}</span></div>
+                                        </div></td>
+                                        <td className="p-3 text-center align-top">
+                                            <button onClick={() => handleDelete(t.id)} className="text-gray-300 hover:text-red-500 p-1 transition-colors"><Trash2 size={16}/></button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+      )}
+
+      {activeTab === 'summary' && (
+        <div className="bg-white p-6 rounded-lg shadow border border-gray-200">
+            <h2 className="text-xl font-bold mb-6 text-slate-800">Monthly Cash Outflow by Outlet</h2>
+            <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse whitespace-nowrap">
+                    <thead>
+                        <tr className="bg-slate-800 text-white text-xs uppercase">
+                            <th className="p-3 text-left rounded-tl-lg border-r border-slate-600 sticky left-0 bg-slate-800">Payment Due (N+3)</th>
+                            <th className="p-3 text-right border-r border-slate-600 bg-blue-900">Run 1 (1-15)</th>
+                            <th className="p-3 text-right border-r border-slate-600 bg-blue-900">Run 2 (16-24)</th>
+                            <th className="p-3 text-right border-r border-slate-600 bg-blue-900">Run 3 (25-End)</th>
+                            {OUTLETS.map(o => <th key={o} className="p-3 text-right border-r border-slate-600">{o}</th>)}
+                            <th className="p-3 text-right border-r border-slate-600 bg-indigo-900">AOS Type Total</th>
+                            <th className="p-3 text-right bg-green-700 border-l border-green-600 rounded-tr-lg">Total Outflow</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {summaryData.map((row, i) => (
+                            <tr key={i} className="border-b hover:bg-gray-50">
+                                <td className="p-3 font-bold text-gray-700 border-r sticky left-0 bg-white">{row.label}</td>
+                                <td className="p-3 text-right font-mono text-blue-700 border-r bg-blue-50/50">{formatCurrency(row.run1)}</td>
+                                <td className="p-3 text-right font-mono text-blue-700 border-r bg-blue-50/50">{formatCurrency(row.run2)}</td>
+                                <td className="p-3 text-right font-mono text-blue-700 border-r bg-blue-50/50">{formatCurrency(row.run3)}</td>
+                                {OUTLETS.map(o => <td key={o} className="p-3 text-right font-mono text-gray-600 border-r">{row[o] ? formatCurrency(row[o]) : '-'}</td>)}
+                                <td className="p-3 text-right font-mono text-indigo-700 border-r bg-indigo-50/50">{formatCurrency(row.aosTotal)}</td>
+                                <td className="p-3 text-right font-mono font-bold text-green-800 bg-green-50 border-l border-green-100">{formatCurrency(row.Total)}</td>
+                            </tr>
+                        ))}
+                        {summaryData.length === 0 && <tr><td colSpan={9} className="p-8 text-center text-gray-400">No approved invoices for projection.</td></tr>}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      )}
+
+      {/* RECONCILE TAB */}
+      {activeTab === 'reconcile' && (
+        <div className="bg-white p-6 rounded-lg shadow border border-gray-200">
+            <h2 className="text-xl font-bold mb-6 text-slate-800">Payment Reconciliation</h2>
+            <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse whitespace-nowrap">
+                    <thead>
+                        <tr className="bg-slate-800 text-white text-xs uppercase">
+                            <th className="p-3 text-left rounded-tl-lg">Month</th>
+                            <th className="p-3 text-right bg-emerald-800 border-r border-slate-600">Accrued</th>
+                            <th className="p-3 text-right bg-amber-600 border-r border-slate-600">WH Ref</th>
+                            <th className="p-3 text-right bg-slate-700 border-r border-slate-600">Run 1</th>
+                            <th className="p-3 text-right bg-slate-700 border-r border-slate-600">Run 2</th>
+                            <th className="p-3 text-right bg-slate-700 border-r border-slate-600">Run 3</th>
+                            <th className="p-3 text-right bg-blue-900 border-l border-slate-600">Paid</th>
+                            <th className="p-3 text-right bg-red-900 border-l border-slate-600 rounded-tr-lg">Balance</th>
+                            <th className="p-3 text-center bg-gray-700">Edit</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {summaryData.map((row, i) => {
+                             const totalPaid = (row.paidRun1 || 0) + (row.paidRun2 || 0) + (row.paidRun3 || 0);
+                             const balance = row.Total - totalPaid;
+                             const whRef = row.Total * GLOBAL_WH_TAX_RATE;
+                             const isEditing = editingPayment.monthKey === row.monthKey;
+                             
+                             return (
+                                <tr key={i} className="border-b hover:bg-gray-50">
+                                    <td className="p-3 font-bold text-gray-700">{row.label}</td>
+                                    <td className="p-3 text-right font-mono font-bold text-emerald-800 border-r">{formatCurrency(row.Total)}</td>
+                                    <td className="p-3 text-right font-mono text-amber-600 border-r bg-amber-50">{formatCurrency(whRef)}</td>
+                                    
+                                    <td className="p-2 text-right bg-gray-50 border-r">
+                                        {isEditing ? <input type="number" className="w-20 p-1 border rounded text-right font-mono text-xs" value={editingPayment.run1} onChange={e => setEditingPayment({...editingPayment, run1: e.target.value})} /> : formatCurrency(row.paidRun1)}
+                                    </td>
+                                    <td className="p-2 text-right bg-gray-50 border-r">
+                                        {isEditing ? <input type="number" className="w-20 p-1 border rounded text-right font-mono text-xs" value={editingPayment.run2} onChange={e => setEditingPayment({...editingPayment, run2: e.target.value})} /> : formatCurrency(row.paidRun2)}
+                                    </td>
+                                    <td className="p-2 text-right bg-gray-50 border-r">
+                                        {isEditing ? <input type="number" className="w-20 p-1 border rounded text-right font-mono text-xs" value={editingPayment.run3} onChange={e => setEditingPayment({...editingPayment, run3: e.target.value})} /> : formatCurrency(row.paidRun3)}
+                                    </td>
+                                    
+                                    <td className="p-3 text-right font-mono font-bold text-blue-700 border-l">{formatCurrency(totalPaid)}</td>
+                                    <td className={`p-3 text-right font-mono font-bold border-l ${balance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(balance)}</td>
+                                    <td className="p-2 text-center">
+                                        {isEditing ? (
+                                            <div className="flex gap-1 justify-center">
+                                                <button onClick={() => handleSavePayment(row.monthKey)} className="bg-green-600 text-white px-2 py-1 rounded text-[10px]">Save</button>
+                                                <button onClick={() => setEditingPayment({monthKey:null})} className="bg-gray-400 text-white px-2 py-1 rounded text-[10px]">X</button>
+                                            </div>
+                                        ) : (
+                                            <button onClick={() => setEditingPayment({ monthKey: row.monthKey, run1: row.paidRun1, run2: row.paidRun2, run3: row.paidRun3 })} className="bg-slate-700 text-white px-3 py-1 rounded text-[10px]">Edit</button>
+                                        )}
+                                    </td>
+                                </tr>
+                             );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      )}
+
+      {/* REPORTS TAB */}
+      {activeTab === 'reports' && (
+        <div className="bg-white p-6 rounded-lg shadow border border-gray-200">
+            <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                    <FileBarChart className="text-amber-500" /> Open Purchase Orders (Est. Values)
+                </h2>
+                <div className="flex gap-2">
+                     <button onClick={downloadOpenPoReport} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded text-sm font-bold flex items-center gap-2">
+                         <Download size={14} /> Export Open POs
+                     </button>
+                     <button onClick={handlePrintReport} className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded text-sm font-bold flex items-center gap-2">
+                         <Printer size={14} /> Print View
+                     </button>
+                </div>
+            </div>
+
+            <div className="overflow-x-auto print:overflow-visible">
+                <table className="w-full text-sm border-collapse whitespace-nowrap">
+                    <thead>
+                        <tr className="bg-slate-800 text-white text-xs uppercase">
+                            <th className="p-3 text-left rounded-tl-lg">PO #</th>
+                            <th className="p-3 text-left">Outlet</th>
+                            <th className="p-3 text-left">PO Date</th>
+                            <th className="p-3 text-right">Estimated Amount</th>
+                            <th className="p-3 text-center rounded-tr-lg">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {openPoList.map((t, i) => (
+                            <tr key={i} className="border-b hover:bg-gray-50">
+                                <td className="p-3 font-mono font-bold text-blue-700">{t.poNo}</td>
+                                <td className="p-3 font-bold text-slate-600">{t.outlet}</td>
+                                <td className="p-3 text-slate-500">{formatDisplayDate(t.poDate)}</td>
+                                <td className="p-3 text-right font-mono font-bold text-amber-700">{formatCurrency(t.poAmount)}</td>
+                                <td className="p-3 text-center">
+                                    <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-full font-bold">OPEN / PENDING</span>
+                                </td>
+                            </tr>
+                        ))}
+                        {openPoList.length === 0 && (
+                            <tr><td colSpan={5} className="p-8 text-center text-gray-400 italic">No open purchase orders found in this period.</td></tr>
+                        )}
+                        {/* TOTAL ROW */}
+                        {openPoList.length > 0 && (
+                            <tr className="bg-amber-50 font-bold border-t-2 border-amber-200">
+                                <td colSpan={3} className="p-3 text-right uppercase text-amber-800">Total Open Value:</td>
+                                <td className="p-3 text-right font-mono text-amber-900 text-lg">{formatCurrency(openPoList.reduce((s,t) => s + (parseFloat(t.poAmount)||0), 0))}</td>
+                                <td></td>
+                            </tr>
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      )}
+      
+      {/* FOOTER */}
+      <div className="fixed bottom-0 left-0 w-full bg-slate-800 text-white text-[10px] p-1 px-4 flex justify-between items-center z-50 opacity-90 print:hidden">
+          <div className="flex gap-4">
+              <span className="flex items-center gap-1 text-green-400"><Wifi size={10} /> Live Connection</span>
+              <span>PO Records: {transactions.length}</span>
+          </div>
+          <div className="text-slate-500 font-mono">ID: {currentLedgerId.substring(0,8)}...</div>
+      </div>
+
+      {/* PRINT STYLES */}
+      <style>{`
+        @media print {
+            body * { visibility: hidden; }
+            .bg-white.p-6.rounded-lg.shadow.border.border-gray-200, 
+            .bg-white.p-6.rounded-lg.shadow.border.border-gray-200 * {
+                visibility: visible;
+            }
+            .bg-white.p-6.rounded-lg.shadow.border.border-gray-200 {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+                border: none;
+                box-shadow: none;
+            }
+            button, .print\\:hidden { display: none !important; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default App;
