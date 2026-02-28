@@ -34,21 +34,6 @@ const formatCurrency = (amount: any) => {
     return `${CURRENCY} ${val.toLocaleString('en-US')}`;
 };
 
-const getPayableMonth = (invoiceDateStr: string) => {
-    if (!invoiceDateStr) return '';
-    const d = new Date(invoiceDateStr + 'T00:00:00'); // Force local time
-    if (isNaN(d.getTime())) return '';
-    d.setMonth(d.getMonth() + 3); 
-    return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`;
-};
-
-const getDisplayMonth = (isoDate: string) => {
-    if (!isoDate) return '';
-    const [year, month] = isoDate.split('-');
-    const date = new Date(parseInt(year), parseInt(month) - 1);
-    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
-};
-
 // --- INITIAL STATES ---
 const EMPTY_PO_STATE = {
     poNo: '', 
@@ -162,103 +147,213 @@ const App = () => {
     }
   };
 
-  if (isLoading) return <div className="p-8 text-center">Initializing App...</div>;
-  if (error) return <div className="p-8 text-red-500 text-center">{error}</div>;
+  if (isLoading) return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="flex flex-col items-center gap-4">
+        <RefreshCw className="w-10 h-10 text-blue-600 animate-spin" />
+        <p className="text-gray-500 font-medium">Initializing Application...</p>
+      </div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+      <div className="bg-white p-8 rounded-2xl shadow-sm border border-red-100 text-center max-w-md">
+        <X className="w-12 h-12 text-red-500 mx-auto mb-4" />
+        <h2 className="text-xl font-bold text-gray-800 mb-2">Sync Error</h2>
+        <p className="text-gray-600 mb-6">{error}</p>
+        <button onClick={() => window.location.reload()} className="bg-blue-600 text-white px-6 py-2 rounded-xl font-bold">Retry Connection</button>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans p-4">
-      <header className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-        <div className="flex items-center gap-4">
-          <div className="bg-blue-600 p-3 rounded-xl shadow-lg shadow-blue-200">
-            <Activity className="text-white w-6 h-6" />
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-blue-100">
+      {/* HEADER */}
+      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200/60 px-6 py-4">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="bg-gradient-to-br from-blue-600 to-blue-700 p-2.5 rounded-xl shadow-lg shadow-blue-200/50">
+              <Activity className="text-white w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-xl font-extrabold tracking-tight text-slate-800">Payment Cycle</h1>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <p className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">Production Live</p>
+              </div>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight text-gray-800">Payment Cycle Manager</h1>
-            <p className="text-sm text-gray-500 font-medium">Finance & Procurement Tracking</p>
-          </div>
+          
+          <nav className="flex items-center bg-slate-100/80 p-1 rounded-xl border border-slate-200/40">
+            <button 
+              onClick={() => setActiveTab('entry')}
+              className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-bold transition-all duration-200 ${activeTab === 'entry' ? 'bg-white text-blue-600 shadow-md shadow-slate-200/50' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <Plus className="w-4 h-4" /> Entry
+            </button>
+            <button 
+              onClick={() => setActiveTab('cycle')}
+              className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-bold transition-all duration-200 ${activeTab === 'cycle' ? 'bg-white text-blue-600 shadow-md shadow-slate-200/50' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <PieChart className="w-4 h-4" /> Cycle
+            </button>
+          </nav>
         </div>
       </header>
 
-      <nav className="flex gap-2 mb-6 bg-gray-100 p-1.5 rounded-xl w-fit">
-        <button 
-          onClick={() => setActiveTab('entry')}
-          className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${activeTab === 'entry' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-        >
-          Data Entry
-        </button>
-        <button 
-          onClick={() => setActiveTab('cycle')}
-          className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${activeTab === 'cycle' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-        >
-          Payment Cycle
-        </button>
-      </nav>
-
-      <main className="grid grid-cols-1 gap-6">
+      <main className="max-w-7xl mx-auto p-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
         {activeTab === 'entry' ? (
-          <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-              <Plus className="w-5 h-5 text-blue-600" /> New Purchase Order
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-               <div>
-                 <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Outlet</label>
-                 <select 
-                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                   value={currentPo.outlet}
-                   onChange={(e) => setCurrentPo({...currentPo, outlet: e.target.value})}
-                 >
-                   {OUTLETS.map(o => <option key={o} value={o}>{o}</option>)}
-                 </select>
-               </div>
-               <div>
-                 <label className="block text-xs font-bold text-gray-500 uppercase mb-1">PO Number</label>
-                 <input 
-                   type="text" 
-                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                   placeholder="e.g. 24/0001"
-                   value={currentPo.poNo}
-                   onChange={(e) => setCurrentPo({...currentPo, poNo: e.target.value})}
-                 />
-               </div>
-               <div>
-                 <label className="block text-xs font-bold text-gray-500 uppercase mb-1">PO Amount</label>
-                 <input 
-                   type="number" 
-                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                   placeholder="0.00"
-                   value={currentPo.poAmount}
-                   onChange={(e) => setCurrentPo({...currentPo, poAmount: e.target.value})}
-                 />
-               </div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* ENTRY FORM */}
+            <div className="lg:col-span-8 space-y-6">
+              <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm overflow-hidden">
+                <div className="px-8 py-6 border-b border-slate-100 bg-slate-50/30">
+                  <h2 className="text-lg font-bold text-slate-800 flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
+                      <FileText className="w-4 h-4 text-blue-600" />
+                    </div>
+                    Purchase Order Details
+                  </h2>
+                </div>
+                
+                <div className="p-8 space-y-8">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest px-1">Branch Outlet</label>
+                      <select 
+                        className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none font-medium text-slate-700"
+                        value={currentPo.outlet}
+                        onChange={(e) => setCurrentPo({...currentPo, outlet: e.target.value})}
+                      >
+                        {OUTLETS.map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest px-1">PO Reference</label>
+                      <div className="relative">
+                        <Hash className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input 
+                          type="text" 
+                          className="w-full h-12 pl-11 pr-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none font-medium text-slate-700"
+                          placeholder="24/0001"
+                          value={currentPo.poNo}
+                          onChange={(e) => setCurrentPo({...currentPo, poNo: e.target.value})}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest px-1">Initial Amount</label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input 
+                          type="number" 
+                          className="w-full h-12 pl-11 pr-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none font-medium text-slate-700"
+                          placeholder="0.00"
+                          value={currentPo.poAmount}
+                          onChange={(e) => setCurrentPo({...currentPo, poAmount: e.target.value})}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-4">
+                    <button 
+                      onClick={handleSavePo}
+                      className="w-full md:w-auto flex items-center justify-center gap-3 bg-slate-900 text-white px-10 py-4 rounded-2xl font-bold hover:bg-blue-600 transition-all duration-300 shadow-xl shadow-slate-200 active:scale-[0.98]"
+                    >
+                      <Save className="w-5 h-5" /> Commit Purchase Order
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <button 
-              onClick={handleSavePo}
-              className="flex items-center gap-2 bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-100"
-            >
-              <Save className="w-5 h-5" /> Save Purchase Order
-            </button>
+
+            {/* SIDEBAR STATS */}
+            <div className="lg:col-span-4 space-y-6">
+              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-[2rem] p-8 text-white shadow-xl shadow-slate-200">
+                <div className="flex items-center justify-between mb-8">
+                  <div className="w-12 h-12 rounded-2xl bg-white/10 flex items-center justify-center">
+                    <TrendingUp className="w-6 h-6 text-blue-400" />
+                  </div>
+                  <span className="text-[10px] font-bold bg-white/10 px-3 py-1 rounded-full uppercase tracking-tighter">Overview</span>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-slate-400 text-sm font-medium">Total Volume</p>
+                  <h3 className="text-3xl font-black">{formatCurrency(poData.reduce((acc, po) => acc + (parseFloat(po.poAmount) || 0), 0))}</h3>
+                </div>
+                <div className="mt-8 pt-8 border-t border-white/5 grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Orders</p>
+                    <p className="text-xl font-bold">{poData.length}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Active</p>
+                    <p className="text-xl font-bold text-blue-400">{poData.length}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         ) : (
-          <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="pb-4 font-bold text-gray-500 text-xs uppercase">PO No</th>
-                  <th className="pb-4 font-bold text-gray-500 text-xs uppercase">Outlet</th>
-                  <th className="pb-4 font-bold text-gray-500 text-xs uppercase text-right">Amount</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {poData.map((po) => (
-                  <tr key={po.id} className="hover:bg-gray-50/50 transition-colors">
-                    <td className="py-4 font-medium text-gray-700">{po.poNo}</td>
-                    <td className="py-4 text-gray-600">{po.outlet}</td>
-                    <td className="py-4 text-right font-semibold">{formatCurrency(po.poAmount)}</td>
+          <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm overflow-hidden">
+            <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center">
+                  <Database className="w-4 h-4 text-emerald-600" />
+                </div>
+                Transaction Ledger
+              </h2>
+              <div className="flex gap-2">
+                <button className="p-2 hover:bg-slate-100 rounded-lg transition-colors text-slate-400"><Search className="w-5 h-5" /></button>
+                <button className="p-2 hover:bg-slate-100 rounded-lg transition-colors text-slate-400"><Filter className="w-5 h-5" /></button>
+              </div>
+            </div>
+            
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50/50">
+                    <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100">PO Reference</th>
+                    <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100">Location</th>
+                    <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100">Status</th>
+                    <th className="px-8 py-5 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100 text-right">Commitment</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {poData.map((po) => (
+                    <tr key={po.id} className="hover:bg-slate-50/30 transition-all group">
+                      <td className="px-8 py-5 font-bold text-slate-700">{po.poNo}</td>
+                      <td className="px-8 py-5">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-bold">
+                          <MapPin className="w-3 h-3" /> {po.outlet}
+                        </span>
+                      </td>
+                      <td className="px-8 py-5">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-600 text-xs font-bold">
+                          <CheckCircle className="w-3 h-3" /> Verified
+                        </span>
+                      </td>
+                      <td className="px-8 py-5 text-right">
+                        <span className="text-sm font-black text-slate-800 tracking-tight">{formatCurrency(po.poAmount)}</span>
+                      </td>
+                    </tr>
+                  ))}
+                  {poData.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="px-8 py-20 text-center">
+                        <div className="flex flex-col items-center gap-3">
+                          <div className="w-16 h-16 rounded-full bg-slate-50 flex items-center justify-center text-slate-200">
+                            <ClipboardList className="w-8 h-8" />
+                          </div>
+                          <p className="text-slate-400 font-medium">No transactions found in ledger</p>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </main>
