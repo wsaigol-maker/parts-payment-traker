@@ -64,35 +64,71 @@ const generateCompositeId = (outlet: string, poNo: string) => {
     return `${outlet}_${cleanPo}`;
 };
 
+/**
+ * Robust date parser for both YYYY-MM-DD and DD/MM/YYYY
+ * Standardizes to a reliable JS Date object.
+ */
+const parseInputDate = (dateStr: string) => {
+    if (!dateStr || typeof dateStr !== "string") return null;
+    const cleanStr = dateStr.trim();
+
+    // Handle dd/mm/yyyy
+    if (cleanStr.includes("/") && cleanStr.split("/").length === 3) {
+        const [d, m, y] = cleanStr.split("/");
+        return new Date(
+            `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}T00:00:00`,
+        );
+    }
+
+    // Handle yyyy-mm-dd
+    if (cleanStr.includes("-") && cleanStr.split("-").length === 3) {
+        return new Date(cleanStr + "T00:00:00");
+    }
+
+    return null;
+};
+
 const formatDisplayDate = (isoDate: string) => {
     if (!isoDate || typeof isoDate !== "string") return "";
     try {
-        const parts = isoDate.split("-");
-        if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+        const d = parseInputDate(isoDate);
+        if (!d || isNaN(d.getTime())) return isoDate;
+        return `${d.getDate().toString().padStart(2, "0")}/${(d.getMonth() + 1).toString().padStart(2, "0")}/${d.getFullYear()}`;
     } catch (e) {}
     return isoDate;
 };
 
-const getPayableMonth = (invoiceDateStr: string) => {
-    if (!invoiceDateStr) return "";
-    const d = new Date(invoiceDateStr + "T00:00:00");
-    if (isNaN(d.getTime())) return "";
-    d.setMonth(d.getMonth() + 3);
-    return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, "0")}`;
+/**
+ * Calculates N+3 projection month
+ * @returns Month key in YYYY-MM format
+ */
+const getPayableMonthKey = (invoiceDateStr: string) => {
+    const d = parseInputDate(invoiceDateStr);
+    if (!d || isNaN(d.getTime())) return "";
+
+    const year = d.getFullYear();
+    const month = d.getMonth();
+
+    // N+3 logic
+    const payableDate = new Date(year, month + 3, 1);
+    return `${payableDate.getFullYear()}-${(payableDate.getMonth() + 1).toString().padStart(2, "0")}`;
 };
 
-const getDisplayMonth = (isoDate: string) => {
-    if (!isoDate) return "";
-    const parts = isoDate.split("-");
-    if (parts.length < 2) return isoDate;
-    const date = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, 1);
-    return date.toLocaleString("default", { month: "long", year: "numeric" });
+const getDisplayMonth = (isoMonthKey: string) => {
+    if (!isoMonthKey || !isoMonthKey.includes("-")) return "Unknown Month";
+    try {
+        const [year, month] = isoMonthKey.split("-");
+        const date = new Date(parseInt(year), parseInt(month) - 1, 1);
+        // Explicitly set locale to 'en-US' for consistency across deployments
+        return date.toLocaleString("en-US", { month: "long", year: "numeric" });
+    } catch (e) {
+        return isoMonthKey;
+    }
 };
 
 const getPaymentBatch = (invoiceDateStr: string) => {
-    if (!invoiceDateStr) return "N/A";
-    const d = new Date(invoiceDateStr + "T00:00:00");
-    if (isNaN(d.getTime())) return "N/A";
+    const d = parseInputDate(invoiceDateStr);
+    if (!d || isNaN(d.getTime())) return "N/A";
     const day = d.getDate();
     if (day <= 15) return "Run 1";
     if (day <= 24) return "Run 2";
@@ -103,8 +139,8 @@ const generateNextPoNumber = (transactions: any[], currentOutlet: string) => {
     const currentYearShort = new Date().getFullYear().toString().slice(-2);
     const prefix = `${currentYearShort}/`;
     const currentYearPos = transactions
-        .filter((t) => t.outlet === currentOutlet)
-        .map((t) => t.poNo)
+        .filter((t: any) => t.outlet === currentOutlet)
+        .map((t: any) => t.poNo)
         .filter((no) => no && typeof no === "string" && no.startsWith(prefix));
 
     if (currentYearPos.length === 0) return `${prefix}0001`;
@@ -212,6 +248,7 @@ const App = () => {
     const [error, setError] = useState<string | null>(null);
     const [currentAction, setCurrentAction] = useState("ADD");
 
+    // Auto-calculation for the Invoice Staging form
     useEffect(() => {
         const base = parseFloat(stageInv.baseAmount as string) || 0;
         const gst = parseFloat(stageInv.gst as string) || 0;
@@ -221,6 +258,7 @@ const App = () => {
         setStageInv((prev) => ({ ...prev, amount: total }));
     }, [stageInv.baseAmount, stageInv.gst, stageInv.whTax, stageInv.fed]);
 
+    // Auth & DB Initialization
     useEffect(() => {
         const initApp = async () => {
             try {
@@ -238,7 +276,7 @@ const App = () => {
             } catch (e: any) {
                 console.error("Auth Error:", e);
                 setError(
-                    "Authentication failed. Please check Firebase configuration.",
+                    "Authentication failed. Check your Replit internet or Firebase settings.",
                 );
                 setIsLoading(false);
             }
@@ -246,6 +284,7 @@ const App = () => {
         initApp();
     }, []);
 
+    // Data Synchronization
     useEffect(() => {
         if (!db || !user) return;
         const unsubPo = onSnapshot(
@@ -291,6 +330,7 @@ const App = () => {
 
     const transactions = useMemo(() => poData, [poData]);
 
+    // Filter logic for Journal
     const filteredTransactions = useMemo(() => {
         let result = transactions;
         if (dateFilter.start || dateFilter.end) {
@@ -307,6 +347,7 @@ const App = () => {
         return result;
     }, [transactions, dateFilter]);
 
+    // Global Stats logic
     const stats = useMemo(() => {
         const now = new Date();
         const currentMonthKey = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, "0")}`;
@@ -339,7 +380,7 @@ const App = () => {
                     totalInv++;
                     if (inv.isAOS) aosInv++;
                 }
-                const payableMonth = getPayableMonth(inv.date);
+                const payableMonth = getPayableMonthKey(inv.date);
                 if (
                     dateFilter.start
                         ? inv.date >= startFilter && inv.date <= endFilter
@@ -360,12 +401,13 @@ const App = () => {
         };
     }, [transactions, dateFilter]);
 
+    // Main Summary Logic (N+3)
     const summaryData = useMemo(() => {
         const grouping: any = {};
         transactions.forEach((t: any) => {
             t.invoices.forEach((inv: any) => {
                 if (!inv.date || !inv.amount) return;
-                const monthKey = getPayableMonth(inv.date);
+                const monthKey = getPayableMonthKey(inv.date);
                 const batch = getPaymentBatch(inv.date);
                 if (!grouping[monthKey]) {
                     grouping[monthKey] = {
@@ -385,17 +427,27 @@ const App = () => {
                     };
                 }
                 const amt = parseFloat(inv.amount) || 0;
+
+                // Map to Batch Runs
                 if (batch === "Run 1") grouping[monthKey].run1 += amt;
                 else if (batch === "Run 2") grouping[monthKey].run2 += amt;
                 else if (batch === "Run 3") grouping[monthKey].run3 += amt;
+
+                // Map to Outlets
                 if (grouping[monthKey][t.outlet] !== undefined)
                     grouping[monthKey][t.outlet] += amt;
+
+                // Map AOS Breakdown (Subset)
                 if (inv.isAOS) grouping[monthKey].aosTotal += amt;
+
+                // Correct Total Calculation
                 grouping[monthKey].Total += amt;
             });
         });
+
+        // Merge Payment History months
         Object.keys(paymentData).forEach((mKey) => {
-            if (!grouping[mKey])
+            if (!grouping[mKey]) {
                 grouping[mKey] = {
                     monthKey: mKey,
                     label: getDisplayMonth(mKey),
@@ -411,12 +463,15 @@ const App = () => {
                     paidRun2: paymentData[mKey].run2 || 0,
                     paidRun3: paymentData[mKey].run3 || 0,
                 };
+            }
         });
+
         return (Object.values(grouping) as any[]).sort((a: any, b: any) =>
             a.monthKey.localeCompare(b.monthKey),
         );
     }, [transactions, paymentData]);
 
+    // Open PO List for Reports tab
     const openPoList = useMemo(() => {
         const now = new Date();
         const currentMonthKey = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, "0")}`;
@@ -433,7 +488,7 @@ const App = () => {
                         t.invoices.some((i: any) => parseFloat(i.amount) > 0)
                     ),
             )
-            .sort((a: any, b: any) => a.poDate.localeCompare(b.poDate));
+            .sort((a, b) => a.poDate.localeCompare(b.poDate));
     }, [transactions, dateFilter]);
 
     const handlePoLookup = () => {
@@ -454,6 +509,12 @@ const App = () => {
         if (!currentPo.poNo || !db) return;
         const docId = generateCompositeId(currentPo.outlet, currentPo.poNo);
         try {
+            const standardizedPo = {
+                ...currentPo,
+                status: currentPo.invoices.length > 0 ? "Invoiced" : "Pending",
+                lastUpdated: new Date().toISOString(),
+            };
+
             await setDoc(
                 doc(
                     db,
@@ -464,12 +525,7 @@ const App = () => {
                     "purchaseOrders",
                     docId,
                 ),
-                {
-                    ...currentPo,
-                    lastUpdated: new Date().toISOString(),
-                    status:
-                        currentPo.invoices.length > 0 ? "Invoiced" : "Pending",
-                },
+                standardizedPo,
             );
             setCurrentPo({ ...EMPTY_PO_STATE, outlet: activeBranchTab });
             setStageDc(EMPTY_DC_INPUT);
@@ -526,13 +582,20 @@ const App = () => {
                         const poDateIdx = headers.indexOf("PO Date");
                         const estIdx = headers.indexOf("Estimated Amount");
                         const poEstIdx = headers.indexOf("PO Amount (Est)");
+
+                        const rawPoDate =
+                            poDateIdx !== -1
+                                ? (row[poDateIdx] || "").trim()
+                                : "";
+                        const parsedPoDate = parseInputDate(rawPoDate);
+                        const formattedPoDate = parsedPoDate
+                            ? parsedPoDate.toISOString().split("T")[0]
+                            : rawPoDate;
+
                         poMap[id] = {
                             poNo,
                             outlet,
-                            poDate:
-                                poDateIdx !== -1
-                                    ? (row[poDateIdx] || "").trim()
-                                    : "",
+                            poDate: formattedPoDate,
                             poAmount: parseFloat(
                                 (estIdx !== -1
                                     ? row[estIdx]
@@ -545,7 +608,6 @@ const App = () => {
                         };
                     }
 
-                    // DC logic
                     const dcNoIdx = headers.indexOf("DC #");
                     if (dcNoIdx !== -1 && row[dcNoIdx]) {
                         const dNos = row[dcNoIdx]
@@ -561,16 +623,22 @@ const App = () => {
                                 : [];
                         dNos.forEach((n: string, i: number) => {
                             if (!poMap[id].dcs.some((d: any) => d.dcNo === n)) {
+                                const dDateParsed = parseInputDate(
+                                    dDates[i] || "",
+                                );
                                 poMap[id].dcs.push({
                                     id: Math.random().toString(),
                                     dcNo: n,
-                                    dcDate: dDates[i] || "",
+                                    dcDate: dDateParsed
+                                        ? dDateParsed
+                                              .toISOString()
+                                              .split("T")[0]
+                                        : dDates[i] || "",
                                 });
                             }
                         });
                     }
 
-                    // Inv logic
                     const invNoIdx = headers.indexOf("Inv #");
                     if (invNoIdx !== -1 && row[invNoIdx]) {
                         const totalIdx = headers.indexOf("Total");
@@ -581,46 +649,37 @@ const App = () => {
                             )
                         ) {
                             const invDateIdx = headers.indexOf("Inv Date");
-                            const baseIdx = headers.indexOf("Base Amt");
-                            const gstIdx = headers.indexOf("GST");
-                            const whIdx = headers.indexOf("WH");
-                            const fedIdx = headers.indexOf("FED");
-                            const aosIdx = headers.indexOf("AOS Type");
-                            const noteIdx = headers.indexOf("Note");
+                            const rawInvDate =
+                                invDateIdx !== -1 ? row[invDateIdx] || "" : "";
+                            const parsedInvDate = parseInputDate(rawInvDate);
 
                             poMap[id].invoices.push({
                                 id: Math.random().toString(),
                                 number: row[invNoIdx],
-                                date:
-                                    invDateIdx !== -1
-                                        ? row[invDateIdx] || ""
-                                        : "",
-                                baseAmount:
-                                    baseIdx !== -1
-                                        ? parseFloat(row[baseIdx] || "0")
-                                        : 0,
-                                gst:
-                                    gstIdx !== -1
-                                        ? parseFloat(row[gstIdx] || "0")
-                                        : 0,
-                                whTax:
-                                    whIdx !== -1
-                                        ? parseFloat(row[whIdx] || "0")
-                                        : 0,
-                                fed:
-                                    fedIdx !== -1
-                                        ? parseFloat(row[fedIdx] || "0")
-                                        : 0,
+                                date: parsedInvDate
+                                    ? parsedInvDate.toISOString().split("T")[0]
+                                    : rawInvDate,
+                                baseAmount: parseFloat(
+                                    row[headers.indexOf("Base Amt")] || "0",
+                                ),
+                                gst: parseFloat(
+                                    row[headers.indexOf("GST")] || "0",
+                                ),
+                                whTax: parseFloat(
+                                    row[headers.indexOf("WH")] || "0",
+                                ),
+                                fed: parseFloat(
+                                    row[headers.indexOf("FED")] || "0",
+                                ),
                                 amount:
                                     totalIdx !== -1
                                         ? parseFloat(row[totalIdx] || "0")
                                         : 0,
                                 isAOS:
-                                    aosIdx !== -1
-                                        ? (row[aosIdx] || "").toLowerCase() ===
-                                          "yes"
-                                        : false,
-                                note: noteIdx !== -1 ? row[noteIdx] || "" : "",
+                                    (
+                                        row[headers.indexOf("AOS Type")] || ""
+                                    ).toLowerCase() === "yes",
+                                note: row[headers.indexOf("Note")] || "",
                             });
                         }
                     }
@@ -706,7 +765,7 @@ const App = () => {
                             inv.amount,
                             inv.isAOS ? "Yes" : "No",
                             `"${inv.note || ""}"`,
-                            `"${getDisplayMonth(getPayableMonth(inv.date))}"`,
+                            `"${getDisplayMonth(getPayableMonthKey(inv.date))}"`,
                             getPaymentBatch(inv.date),
                             t.status,
                         ].join(","),
@@ -762,7 +821,7 @@ const App = () => {
                 [
                     `"${t.poNo}"`,
                     t.outlet,
-                    t.poDate,
+                    formatDisplayDate(t.poDate),
                     t.poAmount || 0,
                     "Open",
                 ].join(","),
@@ -790,8 +849,8 @@ const App = () => {
                     <h1 className="text-2xl font-bold flex items-center gap-2">
                         <DollarSign /> P2P Cloud Manager
                     </h1>
-                    <p className="text-[10px] text-slate-400 font-mono">
-                        DB: {APP_ID}
+                    <p className="text-[10px] text-slate-400 font-mono uppercase">
+                        Database: {APP_ID}
                     </p>
                 </div>
                 <div className="flex items-center gap-2 bg-slate-800 p-1.5 rounded border border-slate-700">
@@ -1380,7 +1439,10 @@ const App = () => {
                                                                             i: any,
                                                                         ) =>
                                                                             s +
-                                                                            i.amount,
+                                                                            (parseFloat(
+                                                                                i.amount,
+                                                                            ) ||
+                                                                                0),
                                                                         0,
                                                                     ),
                                                                 )}
@@ -1413,12 +1475,12 @@ const App = () => {
             {activeTab === "summary" && (
                 <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 overflow-x-auto">
                     <h2 className="text-xl font-bold mb-4">
-                        Outflow Projection
+                        Outflow Projection (N+3 Months)
                     </h2>
                     <table className="w-full text-sm border-collapse whitespace-nowrap">
                         <thead>
                             <tr className="bg-slate-800 text-white text-xs uppercase">
-                                <th className="p-3 text-left">Month (N+3)</th>
+                                <th className="p-3 text-left">Payable Month</th>
                                 <th className="p-3 text-right">Run 1</th>
                                 <th className="p-3 text-right">Run 2</th>
                                 <th className="p-3 text-right">Run 3</th>
@@ -1428,7 +1490,7 @@ const App = () => {
                                     </th>
                                 ))}
                                 <th className="p-3 text-right bg-green-700">
-                                    Total
+                                    Total Outflow
                                 </th>
                             </tr>
                         </thead>
@@ -1463,6 +1525,16 @@ const App = () => {
                                     </td>
                                 </tr>
                             ))}
+                            {summaryData.length === 0 && (
+                                <tr>
+                                    <td
+                                        colSpan={OUTLETS.length + 5}
+                                        className="p-10 text-center text-gray-400 italic"
+                                    >
+                                        No invoices found to project.
+                                    </td>
+                                </tr>
+                            )}
                         </tbody>
                     </table>
                 </div>
