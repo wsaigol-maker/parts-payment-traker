@@ -85,7 +85,7 @@ const getDisplayMonth = (isoDate: string) => {
     if (!isoDate) return "";
     const parts = isoDate.split("-");
     if (parts.length < 2) return isoDate;
-    const date = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1);
+    const date = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, 1);
     return date.toLocaleString("default", { month: "long", year: "numeric" });
 };
 
@@ -109,7 +109,7 @@ const generateNextPoNumber = (transactions: any[], currentOutlet: string) => {
 
     if (currentYearPos.length === 0) return `${prefix}0001`;
 
-    const maxNum = currentYearPos.reduce((max, po) => {
+    const maxNum = currentYearPos.reduce((max: number, po: string) => {
         const parts = po.split("/");
         if (parts.length < 2) return max;
         const part = parseInt(parts[1]);
@@ -202,6 +202,8 @@ const App = () => {
     const [editingPayment, setEditingPayment] = useState<any>({
         monthKey: null,
         run1: 0,
+        run2: 0,
+        run3: 0,
     });
 
     const [db, setDb] = useState<any>(null);
@@ -233,9 +235,11 @@ const App = () => {
                         setIsLoading(false);
                     }
                 });
-            } catch (e) {
+            } catch (e: any) {
                 console.error("Auth Error:", e);
-                setError("Auth failed. Check Firebase console.");
+                setError(
+                    "Authentication failed. Please check Firebase configuration.",
+                );
                 setIsLoading(false);
             }
         };
@@ -265,7 +269,7 @@ const App = () => {
                 });
                 setPoData(data);
             },
-            (err) => setError(`Sync Error: ${err.message}`),
+            (err: any) => setError(`Sync Error: ${err.message}`),
         );
 
         const unsubPayments = onSnapshot(
@@ -292,7 +296,7 @@ const App = () => {
         if (dateFilter.start || dateFilter.end) {
             const start = dateFilter.start || "0000-01-01";
             const end = dateFilter.end || "9999-12-31";
-            result = result.filter((t) => {
+            result = result.filter((t: any) => {
                 if (t.invoices && t.invoices.length > 0)
                     return t.invoices.some(
                         (inv: any) => inv.date >= start && inv.date <= end,
@@ -316,7 +320,7 @@ const App = () => {
             payable = 0,
             openPoValue = 0;
 
-        transactions.forEach((t) => {
+        transactions.forEach((t: any) => {
             if (t.poDate && t.poDate >= startFilter && t.poDate <= endFilter) {
                 const hasInv =
                     t.invoices &&
@@ -358,7 +362,7 @@ const App = () => {
 
     const summaryData = useMemo(() => {
         const grouping: any = {};
-        transactions.forEach((t) => {
+        transactions.forEach((t: any) => {
             t.invoices.forEach((inv: any) => {
                 if (!inv.date || !inv.amount) return;
                 const monthKey = getPayableMonth(inv.date);
@@ -376,6 +380,8 @@ const App = () => {
                         aosTotal: 0,
                         Total: 0,
                         paidRun1: paymentData[monthKey]?.run1 || 0,
+                        paidRun2: paymentData[monthKey]?.run2 || 0,
+                        paidRun3: paymentData[monthKey]?.run3 || 0,
                     };
                 }
                 const amt = parseFloat(inv.amount) || 0;
@@ -402,9 +408,11 @@ const App = () => {
                     aosTotal: 0,
                     Total: 0,
                     paidRun1: paymentData[mKey].run1 || 0,
+                    paidRun2: paymentData[mKey].run2 || 0,
+                    paidRun3: paymentData[mKey].run3 || 0,
                 };
         });
-        return Object.values(grouping).sort((a: any, b: any) =>
+        return (Object.values(grouping) as any[]).sort((a: any, b: any) =>
             a.monthKey.localeCompare(b.monthKey),
         );
     }, [transactions, paymentData]);
@@ -416,7 +424,7 @@ const App = () => {
         let end = dateFilter.end || `${currentMonthKey}-31`;
         return transactions
             .filter(
-                (t) =>
+                (t: any) =>
                     t.poDate >= start &&
                     t.poDate <= end &&
                     !(
@@ -425,20 +433,19 @@ const App = () => {
                         t.invoices.some((i: any) => parseFloat(i.amount) > 0)
                     ),
             )
-            .sort((a, b) => a.poDate.localeCompare(b.poDate));
+            .sort((a: any, b: any) => a.poDate.localeCompare(b.poDate));
     }, [transactions, dateFilter]);
 
     const handlePoLookup = () => {
         const poNo = currentPo.poNo.trim();
         if (!poNo) return;
         const existing = transactions.find(
-            (t) => t.poNo === poNo && t.outlet === activeBranchTab,
+            (t: any) => t.poNo === poNo && t.outlet === activeBranchTab,
         );
         if (existing) {
             setCurrentPo({ ...existing });
             setCurrentAction("UPDATE");
         } else {
-            setCurrentPo({ ...EMPTY_PO_STATE, poNo, outlet: activeBranchTab });
             setCurrentAction("ADD");
         }
     };
@@ -489,7 +496,7 @@ const App = () => {
                     id,
                 ),
             );
-        } catch (e) {
+        } catch (e: any) {
             setError("Delete failed.");
         }
     };
@@ -502,29 +509,36 @@ const App = () => {
         reader.onload = async (ev: any) => {
             try {
                 const rows = parseCSV(ev.target.result);
-                if (rows.length < 2) throw new Error("Invalid CSV");
+                if (rows.length < 2) throw new Error("Invalid CSV format.");
                 const headers = rows[0].map((h: string) => h.trim());
                 const poMap: any = {};
 
                 rows.slice(1).forEach((row) => {
-                    const poNo = (row[headers.indexOf("PO #")] || "").trim();
-                    const outlet = (
-                        row[headers.indexOf("Outlet")] || ""
-                    ).trim();
+                    const poNoIdx = headers.indexOf("PO #");
+                    const outletIdx = headers.indexOf("Outlet");
+                    if (poNoIdx === -1 || outletIdx === -1) return;
+                    const poNo = (row[poNoIdx] || "").trim();
+                    const outlet = (row[outletIdx] || "").trim();
                     if (!poNo || !outlet) return;
 
                     const id = generateCompositeId(outlet, poNo);
                     if (!poMap[id]) {
+                        const poDateIdx = headers.indexOf("PO Date");
+                        const estIdx = headers.indexOf("Estimated Amount");
+                        const poEstIdx = headers.indexOf("PO Amount (Est)");
                         poMap[id] = {
                             poNo,
                             outlet,
-                            poDate: (
-                                row[headers.indexOf("PO Date")] || ""
-                            ).trim(),
+                            poDate:
+                                poDateIdx !== -1
+                                    ? (row[poDateIdx] || "").trim()
+                                    : "",
                             poAmount: parseFloat(
-                                row[headers.indexOf("Estimated Amount")] ||
-                                    row[headers.indexOf("PO Amount (Est)")] ||
-                                    "0",
+                                (estIdx !== -1
+                                    ? row[estIdx]
+                                    : poEstIdx !== -1
+                                      ? row[poEstIdx]
+                                      : "0") || "0",
                             ),
                             dcs: [],
                             invoices: [],
@@ -538,10 +552,14 @@ const App = () => {
                             .split(";")
                             .map((s: string) => s.trim())
                             .filter(Boolean);
-                        const dDates = (row[headers.indexOf("DC Date")] || "")
-                            .split(";")
-                            .map((s: string) => s.trim());
-                        dNos.forEach((n, i) => {
+                        const dDatesIdx = headers.indexOf("DC Date");
+                        const dDates =
+                            dDatesIdx !== -1
+                                ? (row[dDatesIdx] || "")
+                                      .split(";")
+                                      .map((s: string) => s.trim())
+                                : [];
+                        dNos.forEach((n: string, i: number) => {
                             if (!poMap[id].dcs.some((d: any) => d.dcNo === n)) {
                                 poMap[id].dcs.push({
                                     id: Math.random().toString(),
@@ -555,41 +573,58 @@ const App = () => {
                     // Inv logic
                     const invNoIdx = headers.indexOf("Inv #");
                     if (invNoIdx !== -1 && row[invNoIdx]) {
-                        const total = parseFloat(
-                            row[headers.indexOf("Total")] || "0",
-                        );
+                        const totalIdx = headers.indexOf("Total");
                         if (
+                            row[invNoIdx] &&
                             !poMap[id].invoices.some(
                                 (i: any) => i.number === row[invNoIdx],
                             )
                         ) {
+                            const invDateIdx = headers.indexOf("Inv Date");
+                            const baseIdx = headers.indexOf("Base Amt");
+                            const gstIdx = headers.indexOf("GST");
+                            const whIdx = headers.indexOf("WH");
+                            const fedIdx = headers.indexOf("FED");
+                            const aosIdx = headers.indexOf("AOS Type");
+                            const noteIdx = headers.indexOf("Note");
+
                             poMap[id].invoices.push({
                                 id: Math.random().toString(),
                                 number: row[invNoIdx],
-                                date: row[headers.indexOf("Inv Date")] || "",
-                                baseAmount: parseFloat(
-                                    row[headers.indexOf("Base Amt")] || "0",
-                                ),
-                                gst: parseFloat(
-                                    row[headers.indexOf("GST")] || "0",
-                                ),
-                                whTax: parseFloat(
-                                    row[headers.indexOf("WH")] || "0",
-                                ),
-                                fed: parseFloat(
-                                    row[headers.indexOf("FED")] || "0",
-                                ),
-                                amount: total,
+                                date:
+                                    invDateIdx !== -1
+                                        ? row[invDateIdx] || ""
+                                        : "",
+                                baseAmount:
+                                    baseIdx !== -1
+                                        ? parseFloat(row[baseIdx] || "0")
+                                        : 0,
+                                gst:
+                                    gstIdx !== -1
+                                        ? parseFloat(row[gstIdx] || "0")
+                                        : 0,
+                                whTax:
+                                    whIdx !== -1
+                                        ? parseFloat(row[whIdx] || "0")
+                                        : 0,
+                                fed:
+                                    fedIdx !== -1
+                                        ? parseFloat(row[fedIdx] || "0")
+                                        : 0,
+                                amount:
+                                    totalIdx !== -1
+                                        ? parseFloat(row[totalIdx] || "0")
+                                        : 0,
                                 isAOS:
-                                    (
-                                        row[headers.indexOf("AOS Type")] || ""
-                                    ).toLowerCase() === "yes",
-                                note: row[headers.indexOf("Note")] || "",
+                                    aosIdx !== -1
+                                        ? (row[aosIdx] || "").toLowerCase() ===
+                                          "yes"
+                                        : false,
+                                note: noteIdx !== -1 ? row[noteIdx] || "" : "",
                             });
                         }
                     }
                 });
-
                 await Promise.all(
                     Object.entries(poMap).map(([id, data]: any) => {
                         data.status =
@@ -612,6 +647,7 @@ const App = () => {
                     }),
                 );
                 setError("Import Success!");
+                setTimeout(() => setError(null), 3000);
             } catch (err: any) {
                 setError("Import failed: " + err.message);
             } finally {
@@ -646,13 +682,11 @@ const App = () => {
         let rows = [headers.join(",")];
         const dataToExport =
             activeTab === "entry"
-                ? transactions.filter((t) => t.outlet === activeBranchTab)
+                ? transactions.filter((t: any) => t.outlet === activeBranchTab)
                 : transactions;
-
-        dataToExport.forEach((t) => {
+        dataToExport.forEach((t: any) => {
             if (t.invoices && t.invoices.length > 0) {
                 t.invoices.forEach((inv: any) => {
-                    const payableMonthISO = getPayableMonth(inv.date);
                     rows.push(
                         [
                             `"${t.poNo}"`,
@@ -672,7 +706,7 @@ const App = () => {
                             inv.amount,
                             inv.isAOS ? "Yes" : "No",
                             `"${inv.note || ""}"`,
-                            `"${getDisplayMonth(payableMonthISO)}"`,
+                            `"${getDisplayMonth(getPayableMonth(inv.date))}"`,
                             getPaymentBatch(inv.date),
                             t.status,
                         ].join(","),
@@ -705,12 +739,40 @@ const App = () => {
                 );
             }
         });
-
         const blob = new Blob([rows.join("\n")], { type: "text/csv" });
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
         a.download = `P2P_Export_${new Date().toISOString().split("T")[0]}.csv`;
+        a.click();
+    };
+
+    const downloadOpenPoReport = () => {
+        if (openPoList.length === 0) return;
+        const headers = [
+            "PO #",
+            "Outlet",
+            "PO Date",
+            "Estimated Amount",
+            "Status",
+        ];
+        const rows = [headers.join(",")];
+        openPoList.forEach((t: any) =>
+            rows.push(
+                [
+                    `"${t.poNo}"`,
+                    t.outlet,
+                    t.poDate,
+                    t.poAmount || 0,
+                    "Open",
+                ].join(","),
+            ),
+        );
+        const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `OpenPO_Report_${new Date().toISOString().split("T")[0]}.csv`;
         a.click();
     };
 
@@ -723,7 +785,6 @@ const App = () => {
 
     return (
         <div className="max-w-7xl mx-auto bg-gray-50 min-h-screen p-4 font-sans text-gray-800">
-            {/* HEADER */}
             <div className="bg-slate-900 text-white p-6 rounded-t-xl shadow-lg mb-6 flex flex-col md:flex-row justify-between items-center gap-4 print:hidden">
                 <div>
                     <h1 className="text-2xl font-bold flex items-center gap-2">
@@ -779,13 +840,13 @@ const App = () => {
                     />
                     <label
                         htmlFor="csv-up"
-                        className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 cursor-pointer"
+                        className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
                     >
                         <Upload size={14} /> Import
                     </label>
                     <button
                         onClick={downloadCSV}
-                        className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2"
+                        className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-colors"
                     >
                         <Download size={14} /> Export
                     </button>
@@ -797,7 +858,7 @@ const App = () => {
                             });
                             setCurrentAction("ADD");
                         }}
-                        className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2"
+                        className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-colors"
                     >
                         <RefreshCw size={14} /> Reset
                     </button>
@@ -812,13 +873,12 @@ const App = () => {
                 </div>
             )}
 
-            {/* TABS */}
             <div className="flex gap-2 mb-6 border-b border-gray-200 print:hidden">
                 {["entry", "summary", "reconcile", "reports"].map((t, idx) => (
                     <button
                         key={t}
                         onClick={() => setActiveTab(t)}
-                        className={`px-4 py-2 font-bold text-sm rounded-t-lg ${activeTab === t ? "bg-white text-blue-600 border-t border-x" : "text-gray-500 hover:bg-gray-100"}`}
+                        className={`px-4 py-2 font-bold text-sm rounded-t-lg transition-colors ${activeTab === t ? "bg-white text-blue-600 border-t border-x" : "text-gray-500 hover:bg-gray-100"}`}
                     >
                         {idx + 1}. {t.charAt(0).toUpperCase() + t.slice(1)}
                     </button>
@@ -845,9 +905,8 @@ const App = () => {
                             </button>
                         ))}
                     </div>
-                    {/* KPI ROW */}
                     <div className="lg:col-span-12 grid grid-cols-1 md:grid-cols-4 gap-4 mb-2">
-                        <div className="bg-amber-50 p-4 rounded-lg border-l-4 border-amber-500 flex items-center justify-between">
+                        <div className="bg-amber-50 p-4 rounded-lg border-l-4 border-amber-500 flex items-center justify-between shadow-sm">
                             <div>
                                 <p className="text-xs font-bold text-amber-500 uppercase">
                                     Open PO {stats.label}
@@ -858,10 +917,10 @@ const App = () => {
                             </div>
                             <FileText className="text-amber-200 w-8 h-8" />
                         </div>
-                        <div className="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500 flex items-center justify-between">
+                        <div className="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-500 flex items-center justify-between shadow-sm">
                             <div>
                                 <p className="text-xs font-bold text-blue-400 uppercase">
-                                    Purchasing {stats.label}
+                                    Purchase {stats.label}
                                 </p>
                                 <p className="text-xl font-extrabold text-blue-900 mt-1">
                                     {formatCurrency(stats.purchasing)}
@@ -869,10 +928,10 @@ const App = () => {
                             </div>
                             <Activity className="text-blue-200 w-8 h-8" />
                         </div>
-                        <div className="bg-indigo-50 p-4 rounded-lg border-l-4 border-indigo-500 flex items-center justify-between">
+                        <div className="bg-indigo-50 p-4 rounded-lg border-l-4 border-indigo-500 flex items-center justify-between shadow-sm">
                             <div>
                                 <p className="text-xs font-bold text-indigo-400 uppercase">
-                                    AOS Invoices {stats.label}
+                                    AOS Type {stats.label}
                                 </p>
                                 <p className="text-xl font-extrabold text-indigo-900 mt-1">
                                     {stats.aosPerc}%
@@ -880,7 +939,7 @@ const App = () => {
                             </div>
                             <PieChart className="text-indigo-200 w-8 h-8" />
                         </div>
-                        <div className="bg-green-50 p-4 rounded-lg border-l-4 border-green-500 flex items-center justify-between">
+                        <div className="bg-green-50 p-4 rounded-lg border-l-4 border-green-500 flex items-center justify-between shadow-sm">
                             <div>
                                 <p className="text-xs font-bold text-green-500 uppercase">
                                     DUE {stats.label}
@@ -894,8 +953,7 @@ const App = () => {
                     </div>
 
                     <div className="lg:col-span-5 space-y-4">
-                        {/* Master PO Card */}
-                        <div className="bg-white p-5 rounded-lg shadow border border-blue-100">
+                        <div className="bg-white p-5 rounded-lg shadow-sm border border-blue-100">
                             <h3 className="text-sm font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
                                 <Hash size={16} /> PO Master ({activeBranchTab})
                             </h3>
@@ -918,7 +976,7 @@ const App = () => {
                                             e.key === "Enter" &&
                                             handlePoLookup()
                                         }
-                                        className="flex-1 p-2 border-2 border-blue-200 rounded font-mono font-bold outline-none"
+                                        className="flex-1 p-2 border-2 border-blue-200 rounded font-mono font-bold outline-none focus:border-blue-500"
                                         disabled={currentAction === "UPDATE"}
                                     />
                                     {currentAction === "ADD" && (
@@ -932,7 +990,7 @@ const App = () => {
                                                     ),
                                                 })
                                             }
-                                            className="bg-blue-100 text-blue-700 px-3 rounded text-xs font-bold"
+                                            className="bg-blue-100 text-blue-700 px-3 rounded text-xs font-bold hover:bg-blue-200"
                                         >
                                             Auto
                                         </button>
@@ -967,7 +1025,7 @@ const App = () => {
                                                 poDate: e.target.value,
                                             })
                                         }
-                                        className="w-full p-2 mt-1 border rounded"
+                                        className="w-full p-2 mt-1 border rounded outline-none focus:border-blue-500"
                                         disabled={currentAction === "UPDATE"}
                                     />
                                 </div>
@@ -985,15 +1043,14 @@ const App = () => {
                                             poAmount: e.target.value,
                                         })
                                     }
-                                    className="w-full p-2 mt-1 border rounded font-bold text-amber-700"
+                                    className="w-full p-2 mt-1 border rounded font-bold text-amber-700 outline-none focus:border-amber-500"
                                     placeholder="0.00"
                                     disabled={currentAction === "UPDATE"}
                                 />
                             </div>
                         </div>
 
-                        {/* DC/Invoice sections... */}
-                        <div className="bg-white p-5 rounded-lg shadow border border-orange-100 relative overflow-hidden">
+                        <div className="bg-white p-5 rounded-lg shadow-sm border border-orange-100 relative overflow-hidden">
                             <div className="absolute top-0 left-0 w-1 h-full bg-orange-400"></div>
                             <h3 className="text-sm font-bold text-slate-500 uppercase mb-3">
                                 Delivery Challans
@@ -1012,7 +1069,7 @@ const App = () => {
                                                 dcNo: e.target.value,
                                             })
                                         }
-                                        className="w-full p-1 border rounded text-sm"
+                                        className="w-full p-1 border rounded text-sm focus:border-orange-500 outline-none"
                                     />
                                 </div>
                                 <div className="flex-1">
@@ -1028,7 +1085,7 @@ const App = () => {
                                                 dcDate: e.target.value,
                                             })
                                         }
-                                        className="w-full p-1 border rounded text-sm"
+                                        className="w-full p-1 border rounded text-sm focus:border-orange-500 outline-none"
                                     />
                                 </div>
                                 <button
@@ -1047,7 +1104,7 @@ const App = () => {
                                         });
                                         setStageDc(EMPTY_DC_INPUT);
                                     }}
-                                    className="bg-orange-500 text-white p-1.5 rounded"
+                                    className="bg-orange-500 text-white p-1.5 rounded hover:bg-orange-600"
                                 >
                                     <Plus size={16} />
                                 </button>
@@ -1073,7 +1130,7 @@ const App = () => {
                                                         ),
                                                     })
                                                 }
-                                                className="text-red-400"
+                                                className="text-red-400 hover:text-red-600"
                                             >
                                                 <Trash2 size={12} />
                                             </button>
@@ -1083,7 +1140,7 @@ const App = () => {
                             </div>
                         </div>
 
-                        <div className="bg-white p-5 rounded-lg shadow border border-green-100 relative overflow-hidden">
+                        <div className="bg-white p-5 rounded-lg shadow-sm border border-green-100 relative overflow-hidden">
                             <div className="absolute top-0 left-0 w-1 h-full bg-green-500"></div>
                             <h3 className="text-sm font-bold text-slate-500 uppercase mb-3 text-green-700">
                                 Invoice Items
@@ -1103,7 +1160,7 @@ const App = () => {
                                                     number: e.target.value,
                                                 })
                                             }
-                                            className="w-full p-1 border rounded text-xs"
+                                            className="w-full p-1 border rounded text-xs focus:border-green-500 outline-none"
                                         />
                                     </div>
                                     <div>
@@ -1119,7 +1176,7 @@ const App = () => {
                                                     date: e.target.value,
                                                 })
                                             }
-                                            className="w-full p-1 border rounded text-xs"
+                                            className="w-full p-1 border rounded text-xs focus:border-green-500 outline-none"
                                         />
                                     </div>
                                 </div>
@@ -1137,7 +1194,7 @@ const App = () => {
                                                     baseAmount: e.target.value,
                                                 })
                                             }
-                                            className="w-full p-1 border border-blue-200 rounded text-xs font-bold"
+                                            className="w-full p-1 border border-blue-200 rounded text-xs font-bold focus:border-green-500 outline-none"
                                         />
                                     </div>
                                     <div>
@@ -1153,7 +1210,7 @@ const App = () => {
                                                     gst: e.target.value,
                                                 })
                                             }
-                                            className="w-full p-1 border rounded text-xs"
+                                            className="w-full p-1 border rounded text-xs focus:border-green-500 outline-none"
                                         />
                                     </div>
                                 </div>
@@ -1208,7 +1265,7 @@ const App = () => {
                                                 });
                                                 setStageInv(EMPTY_INV_INPUT);
                                             }}
-                                            className="bg-green-600 text-white px-3 py-1.5 rounded text-xs font-bold"
+                                            className="bg-green-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-green-700 transition-colors"
                                         >
                                             + Add
                                         </button>
@@ -1219,7 +1276,7 @@ const App = () => {
                                 {currentPo.invoices.map((inv: any) => (
                                     <div
                                         key={inv.id}
-                                        className="flex justify-between items-center text-xs p-1.5 bg-gray-50 rounded border-l-2 border-green-300"
+                                        className="flex justify-between items-center text-xs p-1.5 bg-gray-50 rounded border-l-2 border-orange-300"
                                     >
                                         <div>
                                             <div className="font-bold text-green-800">
@@ -1243,7 +1300,7 @@ const App = () => {
                                                             ),
                                                     })
                                                 }
-                                                className="text-red-400"
+                                                className="text-red-400 hover:text-red-600"
                                             >
                                                 <Trash2 size={12} />
                                             </button>
@@ -1255,7 +1312,7 @@ const App = () => {
                         <button
                             onClick={handleSave}
                             disabled={!currentPo.poNo}
-                            className="w-full bg-slate-800 text-white py-3 rounded-lg shadow font-bold disabled:bg-gray-300"
+                            className="w-full bg-slate-800 text-white py-3 rounded-lg shadow font-bold disabled:bg-gray-300 transition-colors hover:bg-slate-700"
                         >
                             <Save size={18} className="inline mr-2" /> Save
                             Records
@@ -1263,7 +1320,7 @@ const App = () => {
                     </div>
 
                     <div className="lg:col-span-7">
-                        <div className="bg-white rounded-lg shadow overflow-hidden border border-gray-200">
+                        <div className="bg-white rounded-lg shadow-sm overflow-hidden border border-gray-200">
                             <div className="p-4 bg-gray-50 border-b flex justify-between items-center">
                                 <h3 className="font-bold">
                                     Journal ({activeBranchTab})
@@ -1284,17 +1341,17 @@ const App = () => {
                                     <tbody className="divide-y">
                                         {filteredTransactions
                                             .filter(
-                                                (t) =>
+                                                (t: any) =>
                                                     t.outlet ===
                                                     activeBranchTab,
                                             )
-                                            .sort((a, b) =>
+                                            .sort((a: any, b: any) =>
                                                 b.poNo.localeCompare(a.poNo),
                                             )
-                                            .map((t) => (
+                                            .map((t: any) => (
                                                 <tr
                                                     key={t.id}
-                                                    className="hover:bg-blue-50 transition"
+                                                    className="hover:bg-blue-50 transition cursor-default group"
                                                 >
                                                     <td className="p-3 font-mono font-bold text-blue-600">
                                                         {t.poNo}
@@ -1338,7 +1395,7 @@ const App = () => {
                                                                     t.id,
                                                                 )
                                                             }
-                                                            className="text-gray-300 hover:text-red-500"
+                                                            className="text-gray-300 hover:text-red-500 transition-colors"
                                                         >
                                                             <Trash2 size={16} />
                                                         </button>
@@ -1354,9 +1411,9 @@ const App = () => {
             )}
 
             {activeTab === "summary" && (
-                <div className="bg-white p-6 rounded-lg shadow border border-gray-200 overflow-x-auto">
+                <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 overflow-x-auto">
                     <h2 className="text-xl font-bold mb-4">
-                        Cash Outflow Projection
+                        Outflow Projection
                     </h2>
                     <table className="w-full text-sm border-collapse whitespace-nowrap">
                         <thead>
@@ -1376,7 +1433,7 @@ const App = () => {
                             </tr>
                         </thead>
                         <tbody>
-                            {summaryData.map((row) => (
+                            {summaryData.map((row: any) => (
                                 <tr
                                     key={row.monthKey}
                                     className="border-b hover:bg-gray-50"
@@ -1384,24 +1441,24 @@ const App = () => {
                                     <td className="p-3 font-bold">
                                         {row.label}
                                     </td>
-                                    <td className="p-3 text-right text-blue-700">
+                                    <td className="p-3 text-right text-blue-700 font-mono">
                                         {formatCurrency(row.run1)}
                                     </td>
-                                    <td className="p-3 text-right text-blue-700">
+                                    <td className="p-3 text-right text-blue-700 font-mono">
                                         {formatCurrency(row.run2)}
                                     </td>
-                                    <td className="p-3 text-right text-blue-700">
+                                    <td className="p-3 text-right text-blue-700 font-mono">
                                         {formatCurrency(row.run3)}
                                     </td>
                                     {OUTLETS.map((o) => (
                                         <td
                                             key={o}
-                                            className="p-3 text-right text-gray-500"
+                                            className="p-3 text-right text-gray-500 font-mono"
                                         >
                                             {formatCurrency(row[o])}
                                         </td>
                                     ))}
-                                    <td className="p-3 text-right font-bold text-green-800 bg-green-50">
+                                    <td className="p-3 text-right font-bold text-green-800 bg-green-50 font-mono">
                                         {formatCurrency(row.Total)}
                                     </td>
                                 </tr>
@@ -1412,7 +1469,7 @@ const App = () => {
             )}
 
             {activeTab === "reconcile" && (
-                <div className="bg-white p-6 rounded-lg shadow border border-gray-200 overflow-x-auto">
+                <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 overflow-x-auto">
                     <h2 className="text-xl font-bold mb-4">
                         Payment Reconciliation
                     </h2>
@@ -1421,26 +1478,34 @@ const App = () => {
                             <tr className="bg-slate-800 text-white text-xs uppercase">
                                 <th className="p-3 text-left">Month</th>
                                 <th className="p-3 text-right">Accrued</th>
-                                <th className="p-3 text-right">Paid</th>
+                                <th className="p-3 text-right">Run 1 Paid</th>
+                                <th className="p-3 text-right">Run 2 Paid</th>
+                                <th className="p-3 text-right">Run 3 Paid</th>
                                 <th className="p-3 text-right">Balance</th>
                                 <th className="p-3 text-center">Edit</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {summaryData.map((row) => {
-                                const totalPaid = row.paidRun1 || 0;
+                            {summaryData.map((row: any) => {
+                                const totalPaid =
+                                    (row.paidRun1 || 0) +
+                                    (row.paidRun2 || 0) +
+                                    (row.paidRun3 || 0);
                                 const bal = row.Total - totalPaid;
                                 const isEditing =
                                     editingPayment.monthKey === row.monthKey;
                                 return (
-                                    <tr key={row.monthKey} className="border-b">
+                                    <tr
+                                        key={row.monthKey}
+                                        className="border-b hover:bg-gray-50 transition-colors"
+                                    >
                                         <td className="p-3 font-bold">
                                             {row.label}
                                         </td>
-                                        <td className="p-3 text-right font-bold text-emerald-800">
+                                        <td className="p-3 text-right font-bold text-emerald-800 font-mono">
                                             {formatCurrency(row.Total)}
                                         </td>
-                                        <td className="p-3 text-right text-blue-700">
+                                        <td className="p-3 text-right font-mono">
                                             {isEditing ? (
                                                 <input
                                                     type="number"
@@ -1452,47 +1517,118 @@ const App = () => {
                                                                 .value,
                                                         })
                                                     }
-                                                    className="border rounded p-1 w-24 text-right"
+                                                    className="border rounded p-1 w-20 text-right text-xs"
                                                 />
                                             ) : (
-                                                formatCurrency(totalPaid)
+                                                formatCurrency(row.paidRun1)
+                                            )}
+                                        </td>
+                                        <td className="p-3 text-right font-mono">
+                                            {isEditing ? (
+                                                <input
+                                                    type="number"
+                                                    value={editingPayment.run2}
+                                                    onChange={(e) =>
+                                                        setEditingPayment({
+                                                            ...editingPayment,
+                                                            run2: e.target
+                                                                .value,
+                                                        })
+                                                    }
+                                                    className="border rounded p-1 w-20 text-right text-xs"
+                                                />
+                                            ) : (
+                                                formatCurrency(row.paidRun2)
+                                            )}
+                                        </td>
+                                        <td className="p-3 text-right font-mono">
+                                            {isEditing ? (
+                                                <input
+                                                    type="number"
+                                                    value={editingPayment.run3}
+                                                    onChange={(e) =>
+                                                        setEditingPayment({
+                                                            ...editingPayment,
+                                                            run3: e.target
+                                                                .value,
+                                                        })
+                                                    }
+                                                    className="border rounded p-1 w-20 text-right text-xs"
+                                                />
+                                            ) : (
+                                                formatCurrency(row.paidRun3)
                                             )}
                                         </td>
                                         <td
-                                            className={`p-3 text-right font-bold ${bal > 0 ? "text-red-600" : "text-emerald-600"}`}
+                                            className={`p-3 text-right font-bold font-mono ${bal > 0 ? "text-red-600" : "text-emerald-600"}`}
                                         >
                                             {formatCurrency(bal)}
                                         </td>
                                         <td className="p-3 text-center">
                                             {isEditing ? (
-                                                <button
-                                                    onClick={async () => {
-                                                        await setDoc(
-                                                            doc(
-                                                                db,
-                                                                "artifacts",
-                                                                APP_ID,
-                                                                "public",
-                                                                "data",
-                                                                "payments",
-                                                                row.monthKey,
-                                                            ),
-                                                            {
-                                                                run1:
-                                                                    parseFloat(
-                                                                        editingPayment.run1,
-                                                                    ) || 0,
-                                                            },
-                                                            { merge: true },
-                                                        );
-                                                        setEditingPayment({
-                                                            monthKey: null,
-                                                        });
-                                                    }}
-                                                    className="bg-green-600 text-white px-2 py-1 rounded text-xs"
-                                                >
-                                                    Save
-                                                </button>
+                                                <div className="flex gap-1 justify-center">
+                                                    <button
+                                                        onClick={async () => {
+                                                            try {
+                                                                await setDoc(
+                                                                    doc(
+                                                                        db,
+                                                                        "artifacts",
+                                                                        APP_ID,
+                                                                        "public",
+                                                                        "data",
+                                                                        "payments",
+                                                                        row.monthKey,
+                                                                    ),
+                                                                    {
+                                                                        run1:
+                                                                            parseFloat(
+                                                                                editingPayment.run1,
+                                                                            ) ||
+                                                                            0,
+                                                                        run2:
+                                                                            parseFloat(
+                                                                                editingPayment.run2,
+                                                                            ) ||
+                                                                            0,
+                                                                        run3:
+                                                                            parseFloat(
+                                                                                editingPayment.run3,
+                                                                            ) ||
+                                                                            0,
+                                                                    },
+                                                                    {
+                                                                        merge: true,
+                                                                    },
+                                                                );
+                                                                setEditingPayment(
+                                                                    {
+                                                                        monthKey:
+                                                                            null,
+                                                                    },
+                                                                );
+                                                            } catch (err: any) {
+                                                                setError(
+                                                                    "Payment save failed: " +
+                                                                        err.message,
+                                                                );
+                                                            }
+                                                        }}
+                                                        className="bg-green-600 text-white px-2 py-1 rounded text-xs shadow-sm hover:bg-green-700 transition-colors"
+                                                    >
+                                                        Save
+                                                    </button>
+                                                    <button
+                                                        onClick={() =>
+                                                            setEditingPayment({
+                                                                monthKey: null,
+                                                            })
+                                                        }
+                                                        className="bg-gray-400 text-white px-2 py-1 rounded text-xs hover:bg-gray-500 transition-colors"
+                                                    >
+                                                        X
+                                                    </button>
+                                                </div>
                                             ) : (
                                                 <button
                                                     onClick={() =>
@@ -1500,9 +1636,11 @@ const App = () => {
                                                             monthKey:
                                                                 row.monthKey,
                                                             run1: row.paidRun1,
+                                                            run2: row.paidRun2,
+                                                            run3: row.paidRun3,
                                                         })
                                                     }
-                                                    className="bg-slate-700 text-white px-3 py-1 rounded text-xs"
+                                                    className="bg-slate-700 text-white px-3 py-1 rounded text-xs shadow-sm hover:bg-slate-800 transition-colors"
                                                 >
                                                     Edit
                                                 </button>
@@ -1517,7 +1655,7 @@ const App = () => {
             )}
 
             {activeTab === "reports" && (
-                <div className="bg-white p-6 rounded-lg shadow border border-gray-200">
+                <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                     <div className="flex justify-between items-center mb-6">
                         <h2 className="text-xl font-bold">
                             Open Purchase Orders
@@ -1525,76 +1663,85 @@ const App = () => {
                         <div className="flex gap-2">
                             <button
                                 onClick={downloadOpenPoReport}
-                                className="bg-amber-600 text-white px-4 py-2 rounded text-sm font-bold flex items-center gap-2"
+                                className="bg-amber-600 text-white px-4 py-2 rounded text-sm font-bold flex items-center gap-2 hover:bg-amber-500 transition-colors"
                             >
                                 <Download size={14} /> CSV
                             </button>
                         </div>
                     </div>
-                    <table className="w-full text-sm border-collapse">
-                        <thead>
-                            <tr className="bg-slate-800 text-white text-xs uppercase">
-                                <th className="p-3 text-left">PO #</th>
-                                <th className="p-3 text-left">Outlet</th>
-                                <th className="p-3 text-left">PO Date</th>
-                                <th className="p-3 text-right">Est Amount</th>
-                                <th className="p-3 text-center">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {openPoList.map((t, i) => (
-                                <tr key={i} className="border-b">
-                                    <td className="p-3 font-mono font-bold text-blue-700">
-                                        {t.poNo}
-                                    </td>
-                                    <td className="p-3 font-bold">
-                                        {t.outlet}
-                                    </td>
-                                    <td className="p-3 text-slate-500">
-                                        {formatDisplayDate(t.poDate)}
-                                    </td>
-                                    <td className="p-3 text-right font-bold text-amber-700">
-                                        {formatCurrency(t.poAmount)}
-                                    </td>
-                                    <td className="p-3 text-center">
-                                        <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded-full text-[10px] font-bold uppercase">
-                                            Open
-                                        </span>
-                                    </td>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm border-collapse">
+                            <thead>
+                                <tr className="bg-slate-800 text-white text-xs uppercase">
+                                    <th className="p-3 text-left">PO #</th>
+                                    <th className="p-3 text-left">Outlet</th>
+                                    <th className="p-3 text-left">PO Date</th>
+                                    <th className="p-3 text-right">
+                                        Est Amount
+                                    </th>
+                                    <th className="p-3 text-center">Status</th>
                                 </tr>
-                            ))}
-                            {openPoList.length > 0 && (
-                                <tr className="bg-amber-50 font-bold border-t-2 border-amber-200">
-                                    <td
-                                        colSpan={3}
-                                        className="p-3 text-right uppercase"
+                            </thead>
+                            <tbody>
+                                {openPoList.map((t: any, i: number) => (
+                                    <tr
+                                        key={i}
+                                        className="border-b hover:bg-gray-50 transition-colors"
                                     >
-                                        Total Open:
-                                    </td>
-                                    <td className="p-3 text-right font-mono text-amber-900 text-lg">
-                                        {formatCurrency(
-                                            openPoList.reduce(
-                                                (s, t) =>
-                                                    s +
-                                                    (parseFloat(t.poAmount) ||
-                                                        0),
-                                                0,
-                                            ),
-                                        )}
-                                    </td>
-                                    <td></td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
+                                        <td className="p-3 font-mono font-bold text-blue-700">
+                                            {t.poNo}
+                                        </td>
+                                        <td className="p-3 font-bold text-slate-600">
+                                            {t.outlet}
+                                        </td>
+                                        <td className="p-3 text-slate-500">
+                                            {formatDisplayDate(t.poDate)}
+                                        </td>
+                                        <td className="p-3 text-right font-bold text-amber-700 font-mono">
+                                            {formatCurrency(t.poAmount)}
+                                        </td>
+                                        <td className="p-3 text-center">
+                                            <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded-full text-[10px] font-bold uppercase">
+                                                Open
+                                            </span>
+                                        </td>
+                                    </tr>
+                                ))}
+                                {openPoList.length > 0 && (
+                                    <tr className="bg-amber-50 font-bold border-t-2 border-amber-200">
+                                        <td
+                                            colSpan={3}
+                                            className="p-3 text-right uppercase text-amber-800"
+                                        >
+                                            Total Open Value:
+                                        </td>
+                                        <td className="p-3 text-right font-mono text-amber-900 text-lg">
+                                            {formatCurrency(
+                                                openPoList.reduce(
+                                                    (s: number, t: any) =>
+                                                        s +
+                                                        (parseFloat(
+                                                            t.poAmount,
+                                                        ) || 0),
+                                                    0,
+                                                ),
+                                            )}
+                                        </td>
+                                        <td></td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             )}
 
             <div className="fixed bottom-0 left-0 w-full bg-slate-800 text-white text-[10px] p-1 px-4 flex justify-between items-center z-50 opacity-90 print:hidden">
                 <div className="flex gap-4">
-                    <span className="flex items-center gap-1 text-green-400">
+                    <span className="flex items-center gap-1 text-green-400 font-bold">
                         <Wifi size={10} /> Live Cloud Connection
                     </span>
+                    <span>Records: {transactions.length}</span>
                 </div>
                 <div className="text-slate-500 font-mono">Ledger: {APP_ID}</div>
             </div>
