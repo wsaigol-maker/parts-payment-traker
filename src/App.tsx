@@ -158,6 +158,50 @@ const getPaymentBatch = (invoiceDateStr: string) => {
     return 'Run 3';
 };
 
+const generateNextPoNumber = (transactions: PurchaseOrder[], currentOutlet: string) => {
+    const currentYearShort = new Date().getFullYear().toString().slice(-2); 
+    const prefix = `${currentYearShort}/`;
+    const currentYearPos = transactions
+        .filter(t => t.outlet === currentOutlet)
+        .map(t => t.poNo)
+        .filter(no => no && typeof no === 'string' && no.startsWith(prefix));
+    if (currentYearPos.length === 0) return `${prefix}0001`;
+    const maxNum = currentYearPos.reduce((max, po) => {
+        const parts = po.split('/');
+        if (parts.length < 2) return max;
+        const part = parseInt(parts[1]);
+        return !isNaN(part) && part > max ? part : max;
+    }, 0);
+    return `${prefix}${(maxNum + 1).toString().padStart(4, '0')}`;
+};
+
+const parseCSV = (text: string) => {
+    const result: string[][] = [];
+    let row: string[] = [];
+    let inQuotes = false;
+    let val = '';
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (inQuotes) {
+            if (char === '"') {
+                if (i + 1 < text.length && text[i + 1] === '"') { val += '"'; i++; }
+                else { inQuotes = false; }
+            } else { val += char; }
+        } else {
+            if (char === '"') { inQuotes = true; }
+            else if (char === ',') { row.push(val); val = ''; }
+            else if (char === '\n' || char === '\r') {
+                row.push(val); val = '';
+                if (row.some(c => c.trim() !== '')) result.push(row);
+                row = [];
+                if (char === '\r' && i + 1 < text.length && text[i + 1] === '\n') i++;
+            } else { val += char; }
+        }
+    }
+    if (val || row.length > 0) { row.push(val); result.push(row); }
+    return result;
+};
+
 // Helper for branch-specific UI styling
 const getBranchStyle = (outlet: string) => {
   switch (outlet) {
@@ -296,7 +340,7 @@ const App = () => {
       return { purchasing, totalInv, aosInv, payable, openPoValue, aosPerc: totalInv > 0 ? Math.round((aosInv / totalInv) * 100) : 0 };
   }, [transactions]);
 
-  // Projection Summary
+  // Projection Summary logic
   const summaryData = useMemo(() => {
       const grouping: Record<string, PaymentRow> = {};
       transactions.forEach(t => {
@@ -374,7 +418,7 @@ const App = () => {
   const handlePoLookup = () => {
     const poNo = currentPo.poNo.trim();
     if (!poNo) return;
-    // Strictly search within the currently active branch only as requested
+    // Strictly search within the currently active branch only
     const existing = transactions.find(t => t.poNo === poNo && t.outlet === activeBranchTab);
     if (existing) { 
         loadPoForEditing(existing); 
@@ -458,9 +502,9 @@ const App = () => {
     reader.onload = async (ev: any) => {
         try {
             const rows = parseCSV(ev.target.result);
-            const headers = rows[0].map(h => h.trim());
+            const headers = rows[0].map((h: string) => h.trim());
             const poMap: Record<string, any> = {};
-            rows.slice(1).forEach(row => {
+            rows.slice(1).forEach((row: string[]) => {
                 const poNo = (row[headers.indexOf("PO #")] || "").trim();
                 const outlet = (row[headers.indexOf("Outlet")] || "").trim();
                 if (!poNo || !outlet) return;
@@ -572,7 +616,7 @@ const App = () => {
                 </div>
 
                 <div className="bg-white p-5 rounded-lg shadow border border-orange-100 relative">
-                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-3">Delivery Challans</h3>
+                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-3 text-green-700">Delivery Challans</h3>
                     <div className="flex gap-2 mb-3 items-end bg-orange-50 p-3 rounded">
                         <div className="flex-1"><label className="text-[10px] text-orange-600 uppercase font-bold">New DC #</label><input type="text" value={stageDc.dcNo} onChange={e => setStageDc({...stageDc, dcNo: e.target.value})} className="w-full p-1 border rounded text-sm bg-white" /></div>
                         <div className="flex-1"><label className="text-[10px] text-orange-600 uppercase font-bold">Date</label><input type="date" value={stageDc.dcDate} onChange={e => setStageDc({...stageDc, dcDate: e.target.value})} className="w-full p-1 border rounded text-sm bg-white" /></div>
@@ -596,7 +640,7 @@ const App = () => {
                             <div><label className="text-[10px] text-gray-400 uppercase font-bold tracking-widest">Date</label><input type="date" value={stageInv.date} onChange={e => setStageInv({...stageInv, date: e.target.value})} className="w-full p-1.5 border rounded text-xs" /></div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                            <div><label className="text-[10px] text-blue-600 uppercase font-bold tracking-widest">Base Amount</label><input type="number" value={stageInv.baseAmount} onChange={e => setStageInv({...stageInv, baseAmount: parseFloat(e.target.value) || 0})} className="w-full p-1.5 border border-blue-200 rounded text-xs font-bold" /></div>
+                            <div><label className="text-[10px] text-blue-600 uppercase font-bold tracking-widest">Base Amt</label><input type="number" value={stageInv.baseAmount} onChange={e => setStageInv({...stageInv, baseAmount: parseFloat(e.target.value) || 0})} className="w-full p-1.5 border border-blue-200 rounded text-xs font-bold" /></div>
                             <div><label className="text-[10px] text-gray-400 uppercase font-bold tracking-widest">G.S.T</label><input type="number" value={stageInv.gst} onChange={e => setStageInv({...stageInv, gst: parseFloat(e.target.value) || 0})} className="w-full p-1.5 border rounded text-xs" /></div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
