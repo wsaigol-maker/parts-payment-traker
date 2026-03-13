@@ -84,14 +84,10 @@ const firebaseConfig = {
 const OUTLETS = ['Dha', 'Jt', 'Qr'];
 const CURRENCY = 'PKR';
 
-// Helper for branch-specific UI colors
-const getBranchColor = (outlet: string) => {
-  switch (outlet) {
-    case 'Dha': return 'blue';
-    case 'Jt': return 'orange';
-    case 'Qr': return 'emerald';
-    default: return 'slate';
-  }
+// --- HELPERS (Global Scope for Build Stability) ---
+const generateUID = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 };
 
 const formatCurrency = (amount: any) => {
@@ -162,48 +158,14 @@ const getPaymentBatch = (invoiceDateStr: string) => {
     return 'Run 3';
 };
 
-const generateNextPoNumber = (transactions: PurchaseOrder[], currentOutlet: string) => {
-    const currentYearShort = new Date().getFullYear().toString().slice(-2); 
-    const prefix = `${currentYearShort}/`;
-    const currentYearPos = transactions
-        .filter(t => t.outlet === currentOutlet)
-        .map(t => t.poNo)
-        .filter(no => no && typeof no === 'string' && no.startsWith(prefix));
-    if (currentYearPos.length === 0) return `${prefix}0001`;
-    const maxNum = currentYearPos.reduce((max, po) => {
-        const parts = po.split('/');
-        if (parts.length < 2) return max;
-        const part = parseInt(parts[1]);
-        return !isNaN(part) && part > max ? part : max;
-    }, 0);
-    return `${prefix}${(maxNum + 1).toString().padStart(4, '0')}`;
-};
-
-const parseCSV = (text: string) => {
-    const result: string[][] = [];
-    let row: string[] = [];
-    let inQuotes = false;
-    let val = '';
-    for (let i = 0; i < text.length; i++) {
-        const char = text[i];
-        if (inQuotes) {
-            if (char === '"') {
-                if (i + 1 < text.length && text[i + 1] === '"') { val += '"'; i++; }
-                else { inQuotes = false; }
-            } else { val += char; }
-        } else {
-            if (char === '"') { inQuotes = true; }
-            else if (char === ',') { row.push(val); val = ''; }
-            else if (char === '\n' || char === '\r') {
-                row.push(val); val = '';
-                if (row.some(c => c.trim() !== '')) result.push(row);
-                row = [];
-                if (char === '\r' && i + 1 < text.length && text[i + 1] === '\n') i++;
-            } else { val += char; }
-        }
-    }
-    if (val || row.length > 0) { row.push(val); result.push(row); }
-    return result;
+// Helper for branch-specific UI styling
+const getBranchStyle = (outlet: string) => {
+  switch (outlet) {
+    case 'Dha': return { color: 'blue', hex: '#2563eb', text: 'text-blue-600', bg: 'bg-blue-600', border: 'border-blue-200' };
+    case 'Jt': return { color: 'orange', hex: '#ea580c', text: 'text-orange-600', bg: 'bg-orange-500', border: 'border-orange-200' };
+    case 'Qr': return { color: 'emerald', hex: '#059669', text: 'text-emerald-600', bg: 'bg-emerald-600', border: 'border-emerald-200' };
+    default: return { color: 'slate', hex: '#475569', text: 'text-slate-600', bg: 'bg-slate-800', border: 'border-slate-200' };
+  }
 };
 
 // --- INITIAL STATES ---
@@ -334,7 +296,7 @@ const App = () => {
       return { purchasing, totalInv, aosInv, payable, openPoValue, aosPerc: totalInv > 0 ? Math.round((aosInv / totalInv) * 100) : 0 };
   }, [transactions]);
 
-  // Projection Summary logic - restored to include Run and Branch details
+  // Projection Summary
   const summaryData = useMemo(() => {
       const grouping: Record<string, PaymentRow> = {};
       transactions.forEach(t => {
@@ -394,6 +356,11 @@ const App = () => {
     return results;
   }, [transactions, inquiryDates]);
 
+  // Derived inquiry total
+  const inquiryGrandTotal = useMemo(() => {
+    return Object.values(inquiryData).flat().reduce((s, i) => s + (i.amount || 0), 0);
+  }, [inquiryData]);
+
   // Management controls
   const loadPoForEditing = (po: PurchaseOrder) => {
     setCurrentPo({ ...po });
@@ -407,7 +374,7 @@ const App = () => {
   const handlePoLookup = () => {
     const poNo = currentPo.poNo.trim();
     if (!poNo) return;
-    // Strictly search within the currently active branch as requested
+    // Strictly search within the currently active branch only as requested
     const existing = transactions.find(t => t.poNo === poNo && t.outlet === activeBranchTab);
     if (existing) { 
         loadPoForEditing(existing); 
@@ -470,7 +437,7 @@ const App = () => {
     const blob = new Blob([rows.join("\n")], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `Cloud_Export.csv`; a.click();
+    a.href = url; a.download = `Cloud_Database_Export.csv`; a.click();
   };
 
   const downloadOpenPoReport = () => {
@@ -530,11 +497,11 @@ const App = () => {
               <h2 className="text-xl font-extrabold text-slate-900 mb-2">Delete Record?</h2>
               <p className="text-sm text-slate-500 mb-6 leading-relaxed">
                 Permanently delete PO <span className="font-bold text-slate-800">#{currentPo.poNo}</span>? 
-                This action is for the <span className={`font-black uppercase text-${getBranchColor(currentPo.outlet)}-600`}>{currentPo.outlet} Branch</span>.
+                This action is for the <span className={`font-black uppercase text-${getBranchStyle(currentPo.outlet).color}-600`}>{currentPo.outlet} Branch</span>.
               </p>
               <div className="flex gap-3">
-                <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-all">Cancel</button>
-                <button onClick={executeFinalDelete} className="flex-1 px-4 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-red-200">Confirm Delete</button>
+                <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl">Cancel</button>
+                <button onClick={executeFinalDelete} className="flex-1 px-4 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow-lg shadow-red-200">Confirm Delete</button>
               </div>
             </div>
           </div>
@@ -545,7 +512,7 @@ const App = () => {
       <div className="bg-slate-900 text-white p-6 rounded-t-xl shadow-lg mb-6 flex flex-col md:flex-row justify-between items-center gap-4 print:hidden">
         <div>
             <h1 className="text-2xl font-bold flex items-center gap-2 tracking-tight text-white"><DollarSign className="text-emerald-400" /> P2P Cloud Manager</h1>
-            <p className="text-[10px] text-slate-500 font-mono uppercase mt-1 tracking-widest">Database: {currentLedgerId}</p>
+            <p className="text-[10px] text-slate-500 font-mono uppercase mt-1">System: {currentLedgerId}</p>
         </div>
         <div className="flex gap-2">
             <input type="file" accept=".csv" id="csv-up" className="hidden" onChange={handleImportCSV} />
@@ -559,7 +526,7 @@ const App = () => {
 
       <div className="flex gap-2 mb-6 border-b border-gray-200 print:hidden overflow-x-auto">
           {['entry', 'summary', 'reconcile', 'reports', 'inquiry'].map((t, idx) => (
-              <button key={`tab-btn-${t}`} onClick={() => setActiveTab(t)} className={`px-4 py-2 font-bold text-sm rounded-t-lg transition-all whitespace-nowrap ${activeTab===t ? 'bg-white text-blue-600 border-t border-x shadow-sm' : 'text-gray-500 hover:bg-gray-100'}`}>{idx+1}. {t === 'entry' ? 'MANAGEMENT' : t.toUpperCase()}</button>
+              <button key={`tab-head-${t}`} onClick={() => setActiveTab(t)} className={`px-4 py-2 font-bold text-sm rounded-t-lg transition-all whitespace-nowrap ${activeTab===t ? 'bg-white text-blue-600 border-t border-x shadow-sm' : 'text-gray-500 hover:bg-gray-100'}`}>{idx+1}. {t === 'entry' ? 'MANAGEMENT' : t.toUpperCase()}</button>
           ))}
       </div>
 
@@ -572,7 +539,7 @@ const App = () => {
                       onClick={() => { setActiveBranchTab(o); if(currentAction === 'ADD') setCurrentPo(prev => ({ ...prev, outlet: o })); }} 
                       className={`px-6 py-2 rounded-full text-xs font-bold uppercase tracking-wider transition-all shadow-sm
                         ${activeBranchTab === o 
-                          ? `${o==='Dha' ? 'bg-blue-600' : o==='Jt' ? 'bg-orange-500' : 'bg-emerald-600'} text-white ring-2 ring-offset-1 ring-${getBranchColor(o)}-500` 
+                          ? `${getBranchStyle(o).bg} text-white ring-2 ring-offset-1 ring-slate-400` 
                           : 'bg-white text-slate-500 hover:bg-slate-100'}`}
                     >{o} Branch</button>
                 ))}
@@ -586,10 +553,10 @@ const App = () => {
             </div>
             
             <div className="lg:col-span-5 space-y-4">
-                <div className={`bg-white p-5 rounded-lg shadow border ${currentAction === 'UPDATE' ? `border-${getBranchColor(activeBranchTab)}-200 bg-${getBranchColor(activeBranchTab)}-50/10` : 'border-blue-100'}`}>
+                <div className={`bg-white p-5 rounded-lg shadow border ${currentAction === 'UPDATE' ? `border-${getBranchStyle(activeBranchTab).color}-200 bg-${getBranchStyle(activeBranchTab).color}-50/10` : 'border-blue-100'}`}>
                     <div className="flex justify-between items-center mb-4">
                         <h3 className="text-sm font-bold text-slate-500 uppercase flex items-center gap-2"><Hash size={16} /> PO Master ({activeBranchTab})</h3>
-                        {currentAction === 'UPDATE' && <span className={`bg-${getBranchColor(activeBranchTab)}-100 text-${getBranchColor(activeBranchTab)}-700 text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-wider`}>Locked Record</span>}
+                        {currentAction === 'UPDATE' && <span className={`bg-${getBranchStyle(activeBranchTab).color}-100 text-${getBranchStyle(activeBranchTab).color}-700 text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-wider`}>Locked Record</span>}
                     </div>
                     <div className="mb-4">
                         <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">PO Number</label>
@@ -605,7 +572,7 @@ const App = () => {
                 </div>
 
                 <div className="bg-white p-5 rounded-lg shadow border border-orange-100 relative">
-                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-3 text-orange-700">Delivery Challans</h3>
+                    <h3 className="text-sm font-bold text-slate-500 uppercase mb-3">Delivery Challans</h3>
                     <div className="flex gap-2 mb-3 items-end bg-orange-50 p-3 rounded">
                         <div className="flex-1"><label className="text-[10px] text-orange-600 uppercase font-bold">New DC #</label><input type="text" value={stageDc.dcNo} onChange={e => setStageDc({...stageDc, dcNo: e.target.value})} className="w-full p-1 border rounded text-sm bg-white" /></div>
                         <div className="flex-1"><label className="text-[10px] text-orange-600 uppercase font-bold">Date</label><input type="date" value={stageDc.dcDate} onChange={e => setStageDc({...stageDc, dcDate: e.target.value})} className="w-full p-1 border rounded text-sm bg-white" /></div>
@@ -795,7 +762,9 @@ const App = () => {
 
             <div className="bg-slate-900 text-white p-5 rounded-xl flex justify-between items-center shadow-lg border-t-4 border-blue-500">
                 <div className="flex items-center gap-3"><div className="bg-blue-500/20 p-2 rounded-lg"><Calculator className="text-blue-400" /></div><div><p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Inquiry Grand Total</p><p className="text-[10px] text-slate-500 italic font-bold">Aggregated amount for selected period</p></div></div>
-                <div className="text-right"><p className="text-3xl font-black text-white font-mono tracking-tighter">{formatCurrency(Object.values(inquiryData).flat().reduce((s,i)=>s+i.amount, 0))}</p></div>
+                <div className="text-right"><p className="text-3xl font-black text-white font-mono tracking-tighter">
+                  {formatCurrency(inquiryGrandTotal)}
+                </p></div>
             </div>
         </div>
       )}
