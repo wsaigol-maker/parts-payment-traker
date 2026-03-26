@@ -67,22 +67,10 @@ interface EditPaymentState {
   run3: number;
 }
 
-// --- DYNAMIC CONFIGURATION ---
-const ENV_APP_ID = 'payment-cycle-production'; 
-
-const firebaseConfig = {
-  apiKey: "AIzaSyDW1WYymS2rFwH1gNoWyXo0T2aaFO3wa-o",
-  authDomain: "payment-cycle-9f3ab.firebaseapp.com",
-  projectId: "payment-cycle-9f3ab",
-  storageBucket: "payment-cycle-9f3ab.firebasestorage.app",
-  messagingSenderId: "137486312691",
-  appId: "1:137486312691:web:33c701df338bd0b7494386",
-  measurementId: "G-NMHKHHZFM2"
-};
-
-// Constants
-const OUTLETS = ['Dha', 'Jt', 'Qr'];
-const CURRENCY = 'PKR';
+// --- INITIAL STATES (Must be defined before App) ---
+const EMPTY_PO_STATE: PurchaseOrder = { id: '', poNo: '', outlet: 'Dha', poDate: new Date().toISOString().split('T')[0], poAmount: '', dcs: [], invoices: [], status: 'Pending' };
+const EMPTY_INV_INPUT: Invoice = { id: '', number: '', date: '', baseAmount: 0, gst: 0, whTax: 0, fed: 0, amount: 0, note: '', isAOS: false };
+const EMPTY_DC_INPUT: DeliveryChallan = { id: '', dcNo: '', dcDate: '' };
 
 // --- HELPERS (Global Scope for Build Stability) ---
 const generateUID = () => {
@@ -202,7 +190,6 @@ const parseCSV = (text: string) => {
     return result;
 };
 
-// Helper for branch-specific UI styling
 const getBranchStyle = (outlet: string) => {
   switch (outlet) {
     case 'Dha': return { color: 'blue', hex: '#2563eb', text: 'text-blue-600', bg: 'bg-blue-600', border: 'border-blue-200' };
@@ -212,10 +199,22 @@ const getBranchStyle = (outlet: string) => {
   }
 };
 
-// --- INITIAL STATES ---
-const EMPTY_PO_STATE: PurchaseOrder = { id: '', poNo: '', outlet: 'Dha', poDate: new Date().toISOString().split('T')[0], poAmount: '', dcs: [], invoices: [], status: 'Pending' };
-const EMPTY_INV_INPUT: Invoice = { id: '', number: '', date: '', baseAmount: 0, gst: 0, whTax: 0, fed: 0, amount: 0, note: '', isAOS: false };
-const EMPTY_DC_INPUT: DeliveryChallan = { id: '', dcNo: '', dcDate: '' };
+// --- DYNAMIC CONFIGURATION ---
+const ENV_APP_ID = 'payment-cycle-production'; 
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDW1WYymS2rFwH1gNoWyXo0T2aaFO3wa-o",
+  authDomain: "payment-cycle-9f3ab.firebaseapp.com",
+  projectId: "payment-cycle-9f3ab",
+  storageBucket: "payment-cycle-9f3ab.firebasestorage.app",
+  messagingSenderId: "137486312691",
+  appId: "1:137486312691:web:33c701df338bd0b7494386",
+  measurementId: "G-NMHKHHZFM2"
+};
+
+// Constants
+const OUTLETS = ['Dha', 'Jt', 'Qr'];
+const CURRENCY = 'PKR';
 
 const App = () => {
   const [activeTab, setActiveTab] = useState('entry');
@@ -340,7 +339,7 @@ const App = () => {
       return { purchasing, totalInv, aosInv, payable, openPoValue, aosPerc: totalInv > 0 ? Math.round((aosInv / totalInv) * 100) : 0 };
   }, [transactions]);
 
-  // Projection Summary logic
+  // Outflow Projection logic
   const summaryData = useMemo(() => {
       const grouping: Record<string, PaymentRow> = {};
       transactions.forEach(t => {
@@ -402,7 +401,7 @@ const App = () => {
 
   // Derived inquiry total
   const inquiryGrandTotal = useMemo(() => {
-    return Object.values(inquiryData).flat().reduce((s, i) => s + (i.amount || 0), 0);
+    return Object.values(inquiryData).flat().reduce((s: number, i: any) => s + (i.amount || 0), 0);
   }, [inquiryData]);
 
   // Management controls
@@ -418,11 +417,12 @@ const App = () => {
   const handlePoLookup = () => {
     const poNo = currentPo.poNo.trim();
     if (!poNo) return;
-    // Strictly search within the currently active branch only
+    // BRANCH ISOLATION: Strictly search within the currently active branch tab
     const existing = transactions.find(t => t.poNo === poNo && t.outlet === activeBranchTab);
     if (existing) { 
         loadPoForEditing(existing); 
     } else { 
+        // New entry for current branch
         setCurrentPo({ ...EMPTY_PO_STATE, poNo, outlet: activeBranchTab }); 
         setCurrentAction('ADD'); 
     }
@@ -452,6 +452,7 @@ const App = () => {
       setError("Delete failed: No active record loaded.");
       return;
     }
+    // FIXED: Use composite ID to ensure perfect 6-segment document reference
     const docId = generateCompositeId(currentPo.outlet, currentPo.poNo);
     try {
       const docRef = doc(db, 'artifacts', currentLedgerId, 'public', 'data', 'purchaseOrders', docId);
@@ -640,7 +641,7 @@ const App = () => {
                             <div><label className="text-[10px] text-gray-400 uppercase font-bold tracking-widest">Date</label><input type="date" value={stageInv.date} onChange={e => setStageInv({...stageInv, date: e.target.value})} className="w-full p-1.5 border rounded text-xs" /></div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                            <div><label className="text-[10px] text-blue-600 uppercase font-bold tracking-widest">Base Amt</label><input type="number" value={stageInv.baseAmount} onChange={e => setStageInv({...stageInv, baseAmount: parseFloat(e.target.value) || 0})} className="w-full p-1.5 border border-blue-200 rounded text-xs font-bold" /></div>
+                            <div><label className="text-[10px] text-blue-600 uppercase font-bold tracking-widest">Base Amount</label><input type="number" value={stageInv.baseAmount} onChange={e => setStageInv({...stageInv, baseAmount: parseFloat(e.target.value) || 0})} className="w-full p-1.5 border border-blue-200 rounded text-xs font-bold" /></div>
                             <div><label className="text-[10px] text-gray-400 uppercase font-bold tracking-widest">G.S.T</label><input type="number" value={stageInv.gst} onChange={e => setStageInv({...stageInv, gst: parseFloat(e.target.value) || 0})} className="w-full p-1.5 border rounded text-xs" /></div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -682,7 +683,7 @@ const App = () => {
                         <thead className="bg-gray-50 text-xs uppercase text-gray-400 border-b"><tr><th className="p-3 text-left">PO #</th><th className="p-3 text-left">Date</th><th className="p-3 text-left">Stats</th></tr></thead>
                         <tbody className="divide-y">
                             {transactions.filter(t => t.outlet === activeBranchTab).sort((a,b) => b.poNo.localeCompare(a.poNo)).map((t, idx) => (
-                                <tr key={`journal-row-${t.id || idx}`} onClick={() => loadPoForEditing(t)} className="hover:bg-blue-50 transition cursor-pointer group">
+                                <tr key={`journal-row-${t.id}-${idx}`} onClick={() => loadPoForEditing(t)} className="hover:bg-blue-50 transition cursor-pointer group">
                                     <td className="p-3 font-mono font-bold text-blue-600 flex items-center gap-2">{t.poNo} <Search size={12} className="opacity-0 group-hover:opacity-100 text-blue-400" /></td>
                                     <td className="p-3 text-xs">{formatDisplayDate(t.poDate)}</td>
                                     <td className="p-3 text-xs text-green-600 font-bold">{t.invoices.length} Inv ({formatCurrency(t.invoices.reduce((s,i)=>s+i.amount,0))})</td>
