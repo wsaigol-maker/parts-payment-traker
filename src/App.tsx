@@ -1,16 +1,16 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, ChangeEvent, KeyboardEvent } from 'react';
 import { 
   Plus, Trash2, TrendingUp, DollarSign, Download, Save, 
   RefreshCw, Search, Hash, Activity, PieChart,
-  Wifi, Calculator, Filter, X, Printer, FileBarChart, Lock, ClipboardList, Upload, FileText, Pointer, AlertTriangle, CloudOff
+  Wifi, Calculator, Filter, X, Printer, FileBarChart, Lock, ClipboardList, Upload, FileText, Pointer, AlertTriangle, CloudOff, Calendar
 } from 'lucide-react';
 
 // --- FIREBASE IMPORTS ---
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, User } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, Firestore } from 'firebase/firestore';
+import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, Firestore, QuerySnapshot, DocumentData } from 'firebase/firestore';
 
-// --- TYPES ---
+// --- INTERFACES ---
 interface DeliveryChallan {
   id: string;
   dcNo: string;
@@ -44,6 +44,12 @@ interface PurchaseOrder {
   lastUpdated?: string;
 }
 
+interface PaidRun {
+  id: string;
+  date: string;
+  amount: number;
+}
+
 interface PaymentRow {
   monthKey: string;
   label: string;
@@ -55,10 +61,14 @@ interface PaymentRow {
   Qr: number;
   aosTotal: number;
   Total: number;
-  paidRun1: number;
-  paidRun2: number;
-  paidRun3: number;
+  paidRuns: PaidRun[];
+  totalPaid: number;
   [key: string]: any; 
+}
+
+interface EditPaymentState {
+  monthKey: string | null;
+  runs: PaidRun[];
 }
 
 // --- GLOBAL CONSTANTS ---
@@ -66,9 +76,14 @@ const ENV_APP_ID = 'payment-cycle-production';
 const OUTLETS = ['Dha', 'Jt', 'Qr'];
 const CURRENCY = 'PKR';
 
+const getLocalToday = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const EMPTY_PO_STATE: PurchaseOrder = { 
   id: '', poNo: '', outlet: 'Dha', 
-  poDate: new Date().toISOString().split('T')[0], 
+  poDate: getLocalToday(), 
   poAmount: 0, dcs: [], invoices: [], status: 'Pending' 
 };
 const EMPTY_INV_INPUT: Invoice = { 
@@ -155,6 +170,8 @@ const getBranchStyle = (outlet: string) => {
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('entry');
   const [activeBranchTab, setActiveBranchTab] = useState('Dha');
+  const [globalMonth, setGlobalMonth] = useState(getLocalToday().substring(0, 7));
+  
   const [poData, setPoData] = useState<PurchaseOrder[]>([]);
   const [paymentData, setPaymentData] = useState<Record<string, any>>({});
   const [inquiryDates, setInquiryDates] = useState({ from: '', to: '' });
@@ -162,7 +179,7 @@ const App: React.FC = () => {
   const [currentPo, setCurrentPo] = useState<PurchaseOrder>(EMPTY_PO_STATE);
   const [stageDc, setStageDc] = useState<DeliveryChallan>(EMPTY_DC_INPUT);
   const [stageInv, setStageInv] = useState<Invoice>(EMPTY_INV_INPUT);
-  const [editingPayment, setEditingPayment] = useState<any>({ monthKey: null, run1: 0, run2: 0, run3: 0 });
+  const [editingPayment, setEditingPayment] = useState<EditPaymentState>({ monthKey: null, runs: [] });
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 
   const [db, setDb] = useState<Firestore | null>(null);
@@ -171,7 +188,6 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [currentAction, setCurrentAction] = useState<'ADD' | 'UPDATE'>('ADD'); 
 
-  // Initialize Firebase
   useEffect(() => {
     const initApp = async () => {
         try {
@@ -182,7 +198,7 @@ const App: React.FC = () => {
             await signInAnonymously(auth);
             onAuthStateChanged(auth, (u) => { 
                 if (u) { setUser(u); setIsLoading(false); } 
-                else { setError("Authentication required."); }
+                else { setError("Auth required."); }
             });
         } catch (e: any) {
             setError("Cloud Load Error: " + e.message);
@@ -192,11 +208,10 @@ const App: React.FC = () => {
     initApp();
   }, []);
 
-  // Listeners
   useEffect(() => {
     if (!db || !user) return; 
     const unsubPo = onSnapshot(collection(db, 'artifacts', ENV_APP_ID, 'public', 'data', 'purchaseOrders'), 
-        (snapshot) => {
+        (snapshot: QuerySnapshot<DocumentData>) => {
             const data = snapshot.docs.map(docSnap => {
                 const d = docSnap.data() as any;
                 return { 
@@ -215,7 +230,7 @@ const App: React.FC = () => {
     );
 
     const unsubPayments = onSnapshot(collection(db, 'artifacts', ENV_APP_ID, 'public', 'data', 'payments'), 
-        (snapshot) => {
+        (snapshot: QuerySnapshot<DocumentData>) => {
             const pMap: Record<string, any> = {};
             snapshot.docs.forEach((docSnap) => { pMap[docSnap.id] = docSnap.data(); });
             setPaymentData(pMap);
@@ -225,55 +240,74 @@ const App: React.FC = () => {
     return () => { unsubPo(); unsubPayments(); };
   }, [db, user]);
 
-  // KPIs
-  const stats = useMemo(() => {
-      const now = new Date();
-      const monthKey = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}`;
-      let purchasing = 0, totalInv = 0, aosInv = 0, payable = 0, openPoValue = 0;
+  const transactions = useMemo(() => poData, [poData]);
 
-      poData.forEach((t) => {
+  const filteredJournal = useMemo(() => {
+      return transactions.filter(t => {
+          if (t.outlet !== activeBranchTab) return false;
+          if (!globalMonth) return true;
+          const createdThisMonth = t.poDate && t.poDate.startsWith(globalMonth);
+          const invoicedThisMonth = t.invoices && t.invoices.some(inv => inv.date && inv.date.startsWith(globalMonth));
+          return createdThisMonth || invoicedThisMonth;
+      }).sort((a,b) => b.poNo.localeCompare(a.poNo));
+  }, [transactions, activeBranchTab, globalMonth]);
+
+  const stats = useMemo(() => {
+      let purchasing = 0, totalInv = 0, aosInv = 0, payable = 0, openPoValue = 0;
+      transactions.forEach((t) => {
           const poAmt = typeof t.poAmount === 'string' ? parseFloat(t.poAmount) : (t.poAmount || 0);
-          if(t.poDate && t.poDate.startsWith(monthKey)) {
+          if(t.poDate && t.poDate.startsWith(globalMonth)) {
               const hasInv = t.invoices && t.invoices.length > 0 && t.invoices.some(i => (i.amount || 0) > 0);
               if (!hasInv) openPoValue += poAmt;
           }
           t.invoices.forEach((inv) => {
               if(!inv.date) return;
-              if (inv.date.startsWith(monthKey)) {
+              if (inv.date.startsWith(globalMonth)) {
                   purchasing += (inv.baseAmount || 0);
                   totalInv++;
                   if(inv.isAOS) aosInv++;
               }
-              if (getPayableMonthKey(inv.date) === monthKey) {
+              if (getPayableMonthKey(inv.date) === globalMonth) {
                   payable += (inv.amount || 0);
               }
           });
       });
       return { purchasing, totalInv, aosInv, payable, openPoValue, aosPerc: totalInv > 0 ? Math.round((aosInv / totalInv) * 100) : 0 };
-  }, [poData]);
+  }, [transactions, globalMonth]);
 
-  // Table Summaries
   const summaryData = useMemo(() => {
       const grouping: Record<string, PaymentRow> = {};
-      poData.forEach((t) => {
+      transactions.forEach((t) => {
           t.invoices.forEach((inv) => {
               if (!inv.date || !inv.amount) return;
               const monthKey = getPayableMonthKey(inv.date);
               const batch = getPaymentBatch(inv.date); 
+              
               if (!grouping[monthKey]) {
+                  // Legacy parsing support for runs
+                  let parsedRuns = paymentData[monthKey]?.runs || [];
+                  if (parsedRuns.length === 0 && (paymentData[monthKey]?.run1 || paymentData[monthKey]?.run2 || paymentData[monthKey]?.run3)) {
+                      if (paymentData[monthKey]?.run1) parsedRuns.push({ id: generateUID(), date: '', amount: paymentData[monthKey].run1 });
+                      if (paymentData[monthKey]?.run2) parsedRuns.push({ id: generateUID(), date: '', amount: paymentData[monthKey].run2 });
+                      if (paymentData[monthKey]?.run3) parsedRuns.push({ id: generateUID(), date: '', amount: paymentData[monthKey].run3 });
+                  }
+                  
+                  const totalPaid = parsedRuns.reduce((s: number, r: PaidRun) => s + (Number(r.amount) || 0), 0);
+
                   grouping[monthKey] = { 
                     monthKey, label: getDisplayMonth(monthKey), 
                     run1: 0, run2: 0, run3: 0, Dha: 0, Jt: 0, Qr: 0, 
                     aosTotal: 0, Total: 0, 
-                    paidRun1: paymentData[monthKey]?.run1 || 0, 
-                    paidRun2: paymentData[monthKey]?.run2 || 0, 
-                    paidRun3: paymentData[monthKey]?.run3 || 0 
+                    paidRuns: parsedRuns,
+                    totalPaid: totalPaid,
+                    paidRun1: 0, paidRun2: 0, paidRun3: 0 // Kept for TS interface compliance
                   };
               }
               const amt = inv.amount || 0;
               if (batch === 'Run 1') grouping[monthKey].run1 += amt;
               else if (batch === 'Run 2') grouping[monthKey].run2 += amt;
               else if (batch === 'Run 3') grouping[monthKey].run3 += amt;
+              
               if (t.outlet === 'Dha') grouping[monthKey].Dha += amt;
               else if (t.outlet === 'Jt') grouping[monthKey].Jt += amt;
               else if (t.outlet === 'Qr') grouping[monthKey].Qr += amt;
@@ -281,13 +315,13 @@ const App: React.FC = () => {
           });
       });
       return Object.values(grouping).sort((a,b) => a.monthKey.localeCompare(b.monthKey));
-  }, [poData, paymentData]);
+  }, [transactions, paymentData]);
 
   const inquiryData = useMemo(() => {
     const results: Record<string, any[]> = { Dha: [], Jt: [], Qr: [] };
     const fromStr = inquiryDates.from || '1970-01-01';
     const toStr = inquiryDates.to || '2099-12-31';
-    poData.forEach(po => {
+    transactions.forEach(po => {
         if (!po.invoices || !OUTLETS.includes(po.outlet)) return;
         po.invoices.forEach(inv => {
             if (inv.date >= fromStr && inv.date <= toStr) {
@@ -296,13 +330,12 @@ const App: React.FC = () => {
         });
     });
     return results;
-  }, [poData, inquiryDates]);
+  }, [transactions, inquiryDates]);
 
-  // Handlers
   const handlePoLookup = () => {
     const poNo = currentPo.poNo.trim();
     if (!poNo) return;
-    const existing = poData.find(t => t.poNo === poNo && t.outlet === activeBranchTab);
+    const existing = transactions.find(t => t.poNo === poNo && t.outlet === activeBranchTab);
     if (existing) {
         setCurrentPo({ ...existing });
         setCurrentAction('UPDATE');
@@ -324,9 +357,9 @@ const App: React.FC = () => {
               status: currentPo.invoices.length > 0 ? 'Invoiced' : 'Pending' 
           };
           await setDoc(doc(db, 'artifacts', ENV_APP_ID, 'public', 'data', 'purchaseOrders', docId), poToSave, { merge: true });
-          setCurrentPo({ ...EMPTY_PO_STATE, outlet: activeBranchTab });
+          setCurrentPo({ ...EMPTY_PO_STATE, poDate: getLocalToday(), outlet: activeBranchTab });
           setCurrentAction('ADD');
-          setError("Record Saved!"); setTimeout(() => setError(null), 3000);
+          setError("Record Saved Successfully!"); setTimeout(() => setError(null), 3000);
       } catch (e: any) { setError(`Save failed: ${e.message}`); }
   };
 
@@ -336,17 +369,51 @@ const App: React.FC = () => {
     try {
       await deleteDoc(doc(db, 'artifacts', ENV_APP_ID, 'public', 'data', 'purchaseOrders', docId));
       setIsDeleteModalOpen(false);
-      setCurrentPo({ ...EMPTY_PO_STATE, outlet: activeBranchTab });
+      setCurrentPo({ ...EMPTY_PO_STATE, poDate: getLocalToday(), outlet: activeBranchTab });
       setCurrentAction('ADD');
       setError("Deleted Successfully."); setTimeout(() => setError(null), 3000);
     } catch (err: any) { setError("Error: " + err.message); }
   };
 
-  // Auto-calc total
   useEffect(() => {
     const total = (Number(stageInv.baseAmount) || 0) + (Number(stageInv.gst) || 0) + (Number(stageInv.fed) || 0) + (Number(stageInv.whTax) || 0);
     setStageInv(prev => ({ ...prev, amount: total }));
   }, [stageInv.baseAmount, stageInv.gst, stageInv.fed, stageInv.whTax]);
+
+  // Payment UI Handlers
+  const openPaymentEditor = (monthKey: string, currentRuns: PaidRun[]) => {
+      setEditingPayment({
+          monthKey,
+          runs: currentRuns.length > 0 ? [...currentRuns] : [{ id: generateUID(), date: getLocalToday(), amount: 0 }]
+      });
+  };
+
+  const updateEditRun = (id: string, field: 'date' | 'amount', value: string) => {
+      setEditingPayment(prev => ({
+          ...prev,
+          runs: prev.runs.map(r => r.id === id ? { ...r, [field]: field === 'amount' ? (parseFloat(value) || 0) : value } : r)
+      }));
+  };
+
+  const addEditRun = () => {
+      setEditingPayment(prev => ({ ...prev, runs: [...prev.runs, { id: generateUID(), date: getLocalToday(), amount: 0 }] }));
+  };
+
+  const removeEditRun = (id: string) => {
+      setEditingPayment(prev => ({ ...prev, runs: prev.runs.filter(r => r.id !== id) }));
+  };
+
+  const savePayments = async () => {
+      if (!db || !editingPayment.monthKey) return;
+      try {
+          await setDoc(doc(db, 'artifacts', ENV_APP_ID, 'public', 'data', 'payments', editingPayment.monthKey), { 
+              runs: editingPayment.runs 
+          }, { merge: true });
+          setEditingPayment({ monthKey: null, runs: [] });
+      } catch (err: any) {
+          setError("Payment Save Failed: " + err.message);
+      }
+  };
 
   if (isLoading) return <div className="p-20 text-center font-bold text-blue-600 animate-pulse">Syncing Cloud Database...</div>;
 
@@ -367,16 +434,21 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* HEADER */}
       <div className="bg-slate-900 text-white p-6 rounded-t-xl shadow-lg mb-6 flex justify-between items-center gap-4">
         <div>
             <h1 className="text-2xl font-bold flex items-center gap-2"><DollarSign className="text-green-400" /> P2P Cloud Manager</h1>
             <p className="text-[10px] text-slate-500 font-mono uppercase mt-1 flex items-center gap-2">
                 {user ? <Wifi size={10} className="text-green-400" /> : <CloudOff size={10} className="text-red-400" />}
-                Cloud Mode Active
+                Cloud System
             </p>
         </div>
-        <button onClick={() => { setCurrentPo({ ...EMPTY_PO_STATE, outlet: activeBranchTab }); setCurrentAction('ADD'); }} className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-all"><RefreshCw size={14} /> New Entry</button>
+        <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 bg-slate-800 px-3 py-2 rounded-lg border border-slate-700 shadow-inner">
+                <Calendar size={14} className="text-blue-400" />
+                <input type="month" value={globalMonth} onChange={e => setGlobalMonth(e.target.value)} className="bg-transparent text-sm font-bold text-white outline-none cursor-pointer" />
+            </div>
+            <button onClick={() => { setCurrentPo({ ...EMPTY_PO_STATE, poDate: getLocalToday(), outlet: activeBranchTab }); setCurrentAction('ADD'); }} className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-bold flex items-center gap-2 transition-all"><RefreshCw size={14} /> New Entry</button>
+        </div>
       </div>
 
       {error && <div className={`p-3 rounded mb-4 text-xs font-semibold border-l-4 ${error.includes("Successfully") ? 'bg-green-50 text-green-800 border-green-500' : 'bg-yellow-100 text-yellow-800 border-yellow-500'}`}>{error}</div>}
@@ -396,15 +468,15 @@ const App: React.FC = () => {
             </div>
 
             <div className="lg:col-span-12 grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
-                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-amber-500"><p className="text-[10px] font-bold text-slate-400 uppercase">Open POs</p><p className="text-lg font-black text-slate-800">{formatCurrency(stats.openPoValue)}</p></div>
-                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500"><p className="text-[10px] font-bold text-slate-400 uppercase">Purchasing</p><p className="text-lg font-black text-slate-800">{formatCurrency(stats.purchasing)}</p></div>
-                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-indigo-500"><p className="text-[10px] font-bold text-slate-400 uppercase">AOS Ratio</p><p className="text-lg font-black text-slate-800">{stats.aosPerc}%</p></div>
-                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-green-500"><p className="text-[10px] font-bold text-slate-400 uppercase">Total Due</p><p className="text-lg font-black text-slate-800">{formatCurrency(stats.payable)}</p></div>
+                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-amber-500"><p className="text-[10px] font-bold text-slate-400 uppercase">Open POs ({getDisplayMonth(globalMonth)})</p><p className="text-lg font-black text-slate-800">{formatCurrency(stats.openPoValue)}</p></div>
+                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500"><p className="text-[10px] font-bold text-slate-400 uppercase">Purchasing ({getDisplayMonth(globalMonth)})</p><p className="text-lg font-black text-slate-800">{formatCurrency(stats.purchasing)}</p></div>
+                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-indigo-500"><p className="text-[10px] font-bold text-slate-400 uppercase">AOS Ratio ({getDisplayMonth(globalMonth)})</p><p className="text-lg font-black text-slate-800">{stats.aosPerc}%</p></div>
+                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-green-500"><p className="text-[10px] font-bold text-slate-400 uppercase">Total Due (Reconcile {getDisplayMonth(globalMonth)})</p><p className="text-lg font-black text-slate-800">{formatCurrency(stats.payable)}</p></div>
             </div>
             
             <div className="lg:col-span-5 space-y-4">
                 <div className={`bg-white p-5 rounded-lg shadow-sm border ${currentAction === 'UPDATE' ? `border-${getBranchStyle(activeBranchTab).color}-300` : 'border-slate-100'}`}>
-                    <h3 className="text-xs font-bold text-slate-400 uppercase mb-4 flex items-center gap-2"><Hash size={14} /> Record Details ({activeBranchTab})</h3>
+                    <h3 className="text-xs font-bold text-slate-400 uppercase mb-4 flex items-center gap-2"><Hash size={14} /> Master Record Details</h3>
                     <div className="mb-4">
                         <label className="text-[10px] font-bold text-slate-400 uppercase">PO Number</label>
                         <input type="text" value={currentPo.poNo} onChange={e => setCurrentPo({...currentPo, poNo: e.target.value})} onBlur={handlePoLookup} disabled={currentAction === 'UPDATE'} className="w-full mt-1 p-2 border rounded font-mono font-bold outline-none focus:border-blue-500" />
@@ -471,19 +543,24 @@ const App: React.FC = () => {
 
             <div className="lg:col-span-7 overflow-x-auto">
                 <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-                    <div className="bg-gray-50 p-2 border-b text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
-                        <Pointer size={12} className="text-blue-500" /> Click to Edit Records
+                    <div className="bg-gray-50 p-2 border-b text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center justify-between">
+                        <div className="flex items-center gap-2"><Pointer size={12} className="text-blue-500" /> Click to Edit</div>
+                        {globalMonth && <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">Filtered: {getDisplayMonth(globalMonth)}</span>}
                     </div>
                     <table className="w-full text-sm">
                         <thead className="bg-gray-100 text-[10px] uppercase text-gray-500 border-b"><tr><th className="p-3 text-left">PO #</th><th className="p-3 text-left">Date</th><th className="p-3 text-left">Stats</th></tr></thead>
                         <tbody className="divide-y">
-                            {poData.filter(t => t.outlet === activeBranchTab).sort((a,b) => b.poNo.localeCompare(a.poNo)).map((t, idx) => (
-                                <tr key={t.id || idx} onClick={() => loadPoForEditing(t)} className="hover:bg-blue-50 transition cursor-pointer">
-                                    <td className="p-3 font-mono font-bold text-blue-600 flex items-center gap-2">{t.poNo} <Search size={10} className="text-slate-300" /></td>
-                                    <td className="p-3 text-xs text-slate-400">{formatDisplayDate(t.poDate)}</td>
-                                    <td className="p-3 text-xs text-green-600 font-bold">{t.invoices.length} Inv ({formatCurrency(t.invoices.reduce((s,i)=>s+(i.amount || 0), 0))})</td>
-                                </tr>
-                            ))}
+                            {filteredJournal.length === 0 ? (
+                                <tr><td colSpan={3} className="p-6 text-center text-slate-400 text-xs italic">No matching transactions for {getDisplayMonth(globalMonth)}.</td></tr>
+                            ) : (
+                                filteredJournal.map((t, idx) => (
+                                    <tr key={t.id || idx} onClick={() => loadPoForEditing(t)} className="hover:bg-blue-50 transition cursor-pointer">
+                                        <td className="p-3 font-mono font-bold text-blue-600 flex items-center gap-2">{t.poNo} <Search size={10} className="text-slate-300" /></td>
+                                        <td className="p-3 text-xs text-slate-400">{formatDisplayDate(t.poDate)}</td>
+                                        <td className="p-3 text-xs text-green-600 font-bold">{t.invoices.length} Inv ({formatCurrency(t.invoices.reduce((s,i)=>s+(i.amount || 0), 0))})</td>
+                                    </tr>
+                                ))
+                            )}
                         </tbody>
                     </table>
                 </div>
@@ -512,34 +589,50 @@ const App: React.FC = () => {
             <table className="w-full text-sm border-collapse whitespace-nowrap">
                 <thead><tr className="bg-slate-800 text-white text-[10px] uppercase">
                     <th className="p-3 text-left">Month</th><th className="p-3 text-right">Accrued</th>
-                    <th className="p-3 text-right">Paid (All Runs)</th>
+                    <th className="p-3 text-right">Payments Made</th>
                     <th className="p-3 text-right bg-red-900 text-white">Balance</th><th className="p-3 text-center">Action</th>
                 </tr></thead>
                 <tbody>{summaryData.map((row, idx) => {
-                    const totalPaid = (row.paidRun1 || 0) + (row.paidRun2 || 0) + (row.paidRun3 || 0);
-                    const bal = row.Total - totalPaid;
+                    const bal = row.Total - row.totalPaid;
                     const isEditing = editingPayment.monthKey === row.monthKey;
                     return (
                         <tr key={row.monthKey || idx} className="border-b hover:bg-gray-50">
-                            <td className="p-3 font-bold">{row.label}</td><td className="p-3 text-right font-bold text-emerald-800 font-mono">{formatCurrency(row.Total)}</td>
-                            <td className="p-3 text-right font-mono">
+                            <td className="p-3 font-bold align-top">{row.label}</td>
+                            <td className="p-3 text-right font-bold text-emerald-800 font-mono align-top">{formatCurrency(row.Total)}</td>
+                            <td className="p-3 text-right align-top">
                                 {isEditing ? (
-                                    <div className="flex flex-col gap-1">
-                                        <input type="number" placeholder="Run 1" value={editingPayment.run1} onChange={e => setEditingPayment({...editingPayment, run1: parseFloat(e.target.value) || 0})} className="border rounded p-1 text-right text-xs" />
-                                        <input type="number" placeholder="Run 2" value={editingPayment.run2} onChange={e => setEditingPayment({...editingPayment, run2: parseFloat(e.target.value) || 0})} className="border rounded p-1 text-right text-xs" />
-                                        <input type="number" placeholder="Run 3" value={editingPayment.run3} onChange={e => setEditingPayment({...editingPayment, run3: parseFloat(e.target.value) || 0})} className="border rounded p-1 text-right text-xs" />
+                                    <div className="flex flex-col gap-2 items-end">
+                                        {editingPayment.runs.map((r: PaidRun) => (
+                                            <div key={r.id} className="flex items-center gap-1">
+                                                <input type="date" value={r.date} onChange={e => updateEditRun(r.id, 'date', e.target.value)} className="border rounded p-1 text-[10px] outline-none" />
+                                                <input type="number" placeholder="Amount" value={r.amount || ''} onChange={e => updateEditRun(r.id, 'amount', e.target.value)} className="border rounded p-1 text-right text-xs w-24 outline-none" />
+                                                <button onClick={() => removeEditRun(r.id)} className="text-red-400 hover:text-red-600"><X size={14}/></button>
+                                            </div>
+                                        ))}
+                                        <button onClick={addEditRun} className="text-[9px] font-bold uppercase bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 mt-1">+ Add Payment</button>
                                     </div>
-                                ) : formatCurrency(totalPaid)}
+                                ) : (
+                                    <div className="flex flex-col items-end gap-1">
+                                        {row.paidRuns.map((r: PaidRun) => (
+                                            <span key={r.id} className="text-[10px] bg-slate-100 px-2 py-0.5 rounded border border-slate-200 flex justify-between w-36">
+                                                <span className="text-slate-400">{r.date ? formatDisplayDate(r.date) : 'Legacy'}</span>
+                                                <span className="font-bold font-mono">{formatCurrency(r.amount)}</span>
+                                            </span>
+                                        ))}
+                                        {row.paidRuns.length > 0 && <div className="text-xs font-black mt-1 border-t pt-1 border-slate-200">Total: {formatCurrency(row.totalPaid)}</div>}
+                                        {row.paidRuns.length === 0 && <span className="text-slate-300 italic text-[10px]">No payments logged</span>}
+                                    </div>
+                                )}
                             </td>
-                            <td className={`p-3 text-right font-bold font-mono ${bal > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(bal)}</td>
-                            <td className="p-3 text-center">
+                            <td className={`p-3 text-right font-bold font-mono align-top ${bal > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(bal)}</td>
+                            <td className="p-3 text-center align-top">
                                 {isEditing ? (
                                   <div className="flex gap-1 justify-center">
-                                    <button onClick={async () => { if(!db) return; await setDoc(doc(db, 'artifacts', ENV_APP_ID, 'public', 'data', 'payments', row.monthKey), { run1: editingPayment.run1, run2: editingPayment.run2, run3: editingPayment.run3 }, { merge: true }); setEditingPayment({monthKey:null, run1:0, run2:0, run3:0}); }} className="bg-green-600 text-white px-2 py-1 rounded text-xs">Save</button>
-                                    <button onClick={()=>setEditingPayment({monthKey:null, run1:0, run2:0, run3:0})} className="bg-gray-400 text-white px-2 py-1 rounded text-xs">X</button>
+                                    <button onClick={savePayments} className="bg-green-600 text-white px-3 py-1 rounded text-xs shadow-sm hover:bg-green-700 font-bold">Save</button>
+                                    <button onClick={() => setEditingPayment({monthKey: null, runs: []})} className="bg-gray-400 text-white px-2 py-1 rounded shadow-sm hover:bg-gray-500"><X size={14}/></button>
                                   </div>
                                 ) : (
-                                  <button onClick={() => setEditingPayment({monthKey: row.monthKey, run1: row.paidRun1, run2: row.paidRun2, run3: row.paidRun3 })} className="bg-slate-700 text-white px-3 py-1 rounded text-xs">Edit</button>
+                                  <button onClick={() => openPaymentEditor(row.monthKey, row.paidRuns)} className="bg-slate-700 text-white px-3 py-1 rounded text-xs shadow-sm hover:bg-slate-800 transition-colors">Edit</button>
                                 )}
                             </td>
                         </tr>
@@ -577,13 +670,13 @@ const App: React.FC = () => {
             </div>
             <div className="bg-slate-900 text-white p-5 rounded-xl flex justify-between items-center border-t-4 border-blue-500">
                 <div className="flex items-center gap-3"><Calculator className="text-blue-400" /><p className="text-xs font-bold uppercase">Grand Total</p></div>
-                <div className="text-2xl font-black font-mono tracking-tighter">{inquiryGrandTotalStr}</div>
+                <div className="text-2xl font-black font-mono tracking-tighter">{formatCurrency(Object.values(inquiryData).flat().reduce((s,i)=>s+(i.amount||0), 0))}</div>
             </div>
         </div>
       )}
       
       <div className="fixed bottom-0 left-0 w-full bg-slate-800 text-white text-[10px] p-1 px-4 flex justify-between items-center z-50">
-          <div className="flex gap-4"><span className="flex items-center gap-1 text-green-400 font-bold"><Wifi size={10} /> Active</span><span>Records: {poData.length}</span></div><div className="text-slate-500 font-mono">Ledger: {ENV_APP_ID.substring(0,8)}...</div>
+          <div className="flex gap-4"><span className="flex items-center gap-1 text-green-400 font-bold"><Wifi size={10} /> Active</span><span>Records: {poData.length}</span></div><div className="text-slate-500 font-mono">Cloud Mode</div>
       </div>
     </div>
   );
