@@ -285,7 +285,7 @@ const App: React.FC = () => {
               
               if (!grouping[monthKey]) {
                   // Legacy parsing support for runs
-                  let parsedRuns = paymentData[monthKey]?.runs || [];
+                  let parsedRuns: PaidRun[] = paymentData[monthKey]?.runs || [];
                   if (parsedRuns.length === 0 && (paymentData[monthKey]?.run1 || paymentData[monthKey]?.run2 || paymentData[monthKey]?.run3)) {
                       if (paymentData[monthKey]?.run1) parsedRuns.push({ id: generateUID(), date: '', amount: paymentData[monthKey].run1 });
                       if (paymentData[monthKey]?.run2) parsedRuns.push({ id: generateUID(), date: '', amount: paymentData[monthKey].run2 });
@@ -307,7 +307,6 @@ const App: React.FC = () => {
               if (batch === 'Run 1') grouping[monthKey].run1 += amt;
               else if (batch === 'Run 2') grouping[monthKey].run2 += amt;
               else if (batch === 'Run 3') grouping[monthKey].run3 += amt;
-              
               if (t.outlet === 'Dha') grouping[monthKey].Dha += amt;
               else if (t.outlet === 'Jt') grouping[monthKey].Jt += amt;
               else if (t.outlet === 'Qr') grouping[monthKey].Qr += amt;
@@ -380,7 +379,7 @@ const App: React.FC = () => {
     setStageInv(prev => ({ ...prev, amount: total }));
   }, [stageInv.baseAmount, stageInv.gst, stageInv.fed, stageInv.whTax]);
 
-  // Payment UI Handlers
+  // Dynamic Payment Editor Methods
   const openPaymentEditor = (monthKey: string, currentRuns: PaidRun[]) => {
       setEditingPayment({
           monthKey,
@@ -434,6 +433,7 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* HEADER */}
       <div className="bg-slate-900 text-white p-6 rounded-t-xl shadow-lg mb-6 flex justify-between items-center gap-4">
         <div>
             <h1 className="text-2xl font-bold flex items-center gap-2"><DollarSign className="text-green-400" /> P2P Cloud Manager</h1>
@@ -544,7 +544,7 @@ const App: React.FC = () => {
             <div className="lg:col-span-7 overflow-x-auto">
                 <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
                     <div className="bg-gray-50 p-2 border-b text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center justify-between">
-                        <div className="flex items-center gap-2"><Pointer size={12} className="text-blue-500" /> Click to Edit</div>
+                        <div className="flex items-center gap-2"><Pointer size={12} className="text-blue-500" /> Click to Edit Records</div>
                         {globalMonth && <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded">Filtered: {getDisplayMonth(globalMonth)}</span>}
                     </div>
                     <table className="w-full text-sm">
